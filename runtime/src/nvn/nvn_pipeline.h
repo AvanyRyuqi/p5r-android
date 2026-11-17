@@ -122,10 +122,12 @@ inline VkCompareOp effective_depth_compare_op(const DepthStencilInfo& depth) {
     return vk_compare(depth.depth_func);
 }
 inline void effective_stencil_ops(const DepthStencilInfo& depth, uint32_t cull, VkStencilOpState out[2]) {
-    const bool mirror_front = (cull == 0) || (depth.stencil_func[1] == 0) ||
-                              (depth.depth_pass[1] <= 1 && depth.depth_pass[0] > 1);
+    const bool front_dead = depth.stencil_func[0] <= 1 && depth.stencil_func[1] > 1;
+    const bool back_dead = depth.stencil_func[1] <= 1 && depth.stencil_func[0] > 1;
+    const bool mirror_front = !front_dead && (back_dead || (cull == 0) || (depth.stencil_func[1] == 0) ||
+                                              (depth.depth_pass[1] <= 1 && depth.depth_pass[0] > 1));
     for (int f = 0; f < 2; f++) {
-        const int src = mirror_front ? 0 : f;
+        const int src = front_dead ? 1 : (mirror_front ? 0 : f);
         out[f].failOp = vk_stencil_op(depth.stencil_fail[src]);
         out[f].depthFailOp = vk_stencil_op(depth.depth_fail[src]);
         out[f].passOp = vk_stencil_op(depth.depth_pass[src]);

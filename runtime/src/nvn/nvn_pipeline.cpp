@@ -840,8 +840,16 @@ PipelineKey canonical_key(const PipelineKey& in) {
                 k.depth.depth_fail[f] = in.depth.depth_fail[f];
                 k.depth.depth_pass[f] = in.depth.depth_pass[f];
             }
-            if (in.polygon.cull == 0 || (k.depth.stencil_func[1] == 0 && k.depth.depth_pass[1] == 0) ||
-                (k.depth.depth_pass[1] <= 1 && k.depth.depth_pass[0] > 1)) {
+            const bool front_dead = k.depth.stencil_func[0] <= 1 && k.depth.stencil_func[1] > 1;
+            const bool back_dead = k.depth.stencil_func[1] <= 1 && k.depth.stencil_func[0] > 1;
+            if (front_dead) {
+                k.depth.stencil_func[0] = k.depth.stencil_func[1];
+                k.depth.stencil_fail[0] = k.depth.stencil_fail[1];
+                k.depth.depth_fail[0] = k.depth.depth_fail[1];
+                k.depth.depth_pass[0] = k.depth.depth_pass[1];
+            } else if (back_dead || in.polygon.cull == 0 ||
+                       (k.depth.stencil_func[1] == 0 && k.depth.depth_pass[1] == 0) ||
+                       (k.depth.depth_pass[1] <= 1 && k.depth.depth_pass[0] > 1)) {
                 k.depth.stencil_func[1] = k.depth.stencil_func[0];
                 k.depth.stencil_fail[1] = k.depth.stencil_fail[0];
                 k.depth.depth_fail[1] = k.depth.depth_fail[0];

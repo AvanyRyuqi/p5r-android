@@ -768,13 +768,15 @@ inline void effective_draw_state_overrides(const Targets& t, bool tex_empty, Ble
     out_mask = g_state.mask;
     for (uint32_t k = 0; k < 8; k++) out_mask.mask[k] &= 0xF;
     out_depth = g_state.depth;
-    if (s_keep_hud_alpha && g_state.color.blend_enable[0] && (out_mask.mask[0] & 0xF) == 0xF && live_ui_draw(t) &&
+    const bool ui = live_ui_draw(t);
+    if (ui && out_depth.depth_func == 3 && !out_depth.depth_write) out_depth.depth_func = 0x83;
+    if (s_keep_hud_alpha && g_state.color.blend_enable[0] && (out_mask.mask[0] & 0xF) == 0xF && ui &&
         (s_keep_hud_alpha == 2 || !tex_empty)) {
         const BlendTarget& b = out_blend[0];
         if (b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6 && b.eq_rgb <= 1 && b.eq_a <= 1)
             out_mask.mask[0] &= 7;
     }
-    if (const uint32_t live = live_flags(); live && live_ui_draw(t)) {
+    if (const uint32_t live = live_flags(); live && ui) {
         if (live & kLiveUiAlways) out_depth.depth_func = 8;  // NVN ALWAYS
         if (live & kLiveUiNoWrite) out_depth.depth_write = 0;
         if (live & kLiveUiRgb) out_mask.mask[0] &= 7;
@@ -813,9 +815,12 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     const bool need_blend_override = (cnt > 0 && (dc.color_blend_equation || dc.color_write_mask));
     if (need_blend_override) {
         effective_draw_state_overrides(t, tex_empty, eff_blend, eff_mask, eff_depth);
-    } else if (live_flags() && live_ui_draw(t)) {
-        if (live_flags() & kLiveUiAlways) eff_depth.depth_func = 8;
-        if (live_flags() & kLiveUiNoWrite) eff_depth.depth_write = 0;
+    } else if (live_ui_draw(t)) {
+        if (eff_depth.depth_func == 3 && !eff_depth.depth_write) eff_depth.depth_func = 0x83;
+        if (const uint32_t live = live_flags()) {
+            if (live & kLiveUiAlways) eff_depth.depth_func = 8;
+            if (live & kLiveUiNoWrite) eff_depth.depth_write = 0;
+        }
     }
 
     uint32_t bias[4];
@@ -1202,8 +1207,12 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         uint32_t mode = 0;
         uint32_t state_version = 0;
         VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkFormat c0_format = VK_FORMAT_UNDEFINED;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+        uint32_t color_count = 0;
         bool indexed = false;
         bool textures_empty = false;
+        bool ui_draw = false;
         VkPipeline pipeline = VK_NULL_HANDLE;
     };
     static PipeMru s_pipe_mru[4];
@@ -1214,6 +1223,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
 
     const bool tex_empty = g_textures.bindings.empty();
+    const bool ui_draw = live_ui_draw(tt);
+    const VkFormat cur_c0_fmt = tt.color_count ? s_cached_color_formats[0] : VK_FORMAT_UNDEFINED;
     if (!uw_on() && !live_flags()) {
         for (int i = 0; i < 4; i++) {
             const PipeMru& e = s_pipe_mru[i];
@@ -1221,10 +1232,15 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.vs == vs &&
                 e.fs == fs &&
                 e.mode == eff_mode &&
+                e.c0_format == cur_c0_fmt &&
+                e.depth_format == s_cached_depth_format &&
+                e.color_count == tt.color_count &&
                 (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
                 e.state_version == replay::g_pipeline_state_version &&
-                (dc.color_write_mask || e.textures_empty == tex_empty)) {
+                (dc.color_write_mask && dc.color_blend_equation
+                     ? true
+                     : (e.textures_empty == tex_empty && e.ui_draw == ui_draw))) {
                 pipeline = e.pipeline;
                 if (i > 0) {
                     PipeMru hit = e;
@@ -1246,7 +1262,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         key.stream_count = uint32_t(std::min<size_t>(g_state.streams.size(), 16));
         std::copy_n(g_state.streams.begin(), key.stream_count, key.streams);
         key.color = g_state.color, key.polygon = g_state.polygon;
-        effective_draw_state_overrides(t, tex_empty, key.blend, key.mask, key.depth);
+        effective_draw_state_overrides(tt, tex_empty, key.blend, key.mask, key.depth);
         key.restart = effective_primitive_restart(mode, indexed) ? 1 : 0;
         if (indexed && g_state.restart) restart_stats(mode, c);
         frame_draws(vs, indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]));
@@ -1349,7 +1365,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         if (pipeline != VK_NULL_HANDLE && !uw_on() && !live_flags()) {
             for (int j = 3; j > 0; j--) s_pipe_mru[j] = s_pipe_mru[j - 1];
-            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, indexed, tex_empty, pipeline};
+            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, cur_c0_fmt,
+                             s_cached_depth_format, tt.color_count, indexed, tex_empty, ui_draw, pipeline};
         }
     }
     if (!pipeline) {
