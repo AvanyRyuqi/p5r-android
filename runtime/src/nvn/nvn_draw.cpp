@@ -381,12 +381,13 @@ uint64_t g_dump_draws = 0, g_dump_request = 0;
 
 // The graphics stages bound now: one program for all of them (its own list), or a vertex and a fragment program
 // bound separately (their stages gathered in `out`).
-uint64_t g_bound_pv = 0, g_bound_pf = 0, g_bound_serial = 0;
+uint64_t g_bound_pv = 0, g_bound_pf = 0, g_bound_prog_gen = 0;
 const std::vector<const ShaderInfo*>* bound_graphics_shaders(std::vector<const ShaderInfo*>& out) {
     const uint64_t pv = g_state.stage_programs[0], pf = g_state.stage_programs[1];
     if (!pv && !pf) return nullptr;
     if (pv == pf) return program_shaders(pv);
-    if (t_replay_serial && g_bound_serial == t_replay_serial && g_bound_pv == pv && g_bound_pf == pf && !out.empty())
+    const uint64_t cur_pgen = program_generation();
+    if (g_bound_prog_gen == cur_pgen && g_bound_pv == pv && g_bound_pf == pf && !out.empty())
         return &out;
     out.clear();
     if (const auto* sh = program_shaders(pv))
@@ -395,7 +396,7 @@ const std::vector<const ShaderInfo*>* bound_graphics_shaders(std::vector<const S
     if (const auto* sh = program_shaders(pf))
         for (const ShaderInfo* s : *sh)
             if (s->stage == ShaderStage::Fragment) out.push_back(s);
-    g_bound_pv = pv, g_bound_pf = pf, g_bound_serial = t_replay_serial;
+    g_bound_pv = pv, g_bound_pf = pf, g_bound_prog_gen = cur_pgen;
     return &out;
 }
 
@@ -449,11 +450,26 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
     g_hud_target = false;  // no render target: render scale 1 in its support buffer
     g_low_3d_target = false;
     g_is_3d_scene_draw = false;
-    const auto* shaders = program_shaders(g_state.stage_programs[5]);
+    const uint64_t cs_prog = g_state.stage_programs[5];
+    if (!cs_prog) return;
+    const uint64_t cur_pgen = program_generation();
+    static thread_local uint64_t s_last_cs_prog = UINT64_MAX;
+    static thread_local uint64_t s_last_cs_pgen = 0;
+    static thread_local const ShaderInfo* s_cached_cs_stage = nullptr;
     const ShaderInfo* cs = nullptr;
-    if (shaders)
-        for (const ShaderInfo* s : *shaders)
-            if (s->stage == ShaderStage::Compute) cs = s;
+    if (cs_prog == s_last_cs_prog && cur_pgen == s_last_cs_pgen && s_cached_cs_stage) {
+        cs = s_cached_cs_stage;
+    } else {
+        const auto* shaders = program_shaders(cs_prog);
+        if (shaders)
+            for (const ShaderInfo* s : *shaders)
+                if (s->stage == ShaderStage::Compute) cs = s;
+        if (cs) {
+            s_last_cs_prog = cs_prog;
+            s_last_cs_pgen = cur_pgen;
+            s_cached_cs_stage = cs;
+        }
+    }
     if (!cs) return;
     uint32_t x = uint32_t(c.i[0]), y = uint32_t(c.i[1]), z = uint32_t(c.i[2]);
     const uint8_t* args = c.n == 1 ? guest_bytes(c.a[0]) : nullptr;  // indirect: {x, y, z}
@@ -504,10 +520,12 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
 void vertex_read_barrier(VkCommandBuffer cb, const ShaderInfo* vs) {
     if (!g_vertex_pending || !vs) return;
     bool reads = false;
-    for (size_t k = 0; k < g_textures.bindings.size() && !reads; k++) {
-        if (g_textures.bindings[k].first != vs) break;
-        if (k < g_textures.resolved.size() && g_textures.resolved[k].texture)
-            if (GpuImage* img = image_of(g_textures.resolved[k].texture))
+    const TexBindings& t_bindings = g_textures.active_bindings();
+    const std::vector<ResolvedTexture>& t_resolved = g_textures.active_resolved();
+    for (size_t k = 0; k < t_bindings.size() && !reads; k++) {
+        if (t_bindings[k].first != vs) break;
+        if (k < t_resolved.size() && t_resolved[k].texture)
+            if (GpuImage* img = image_of(t_resolved[k].texture))
                 reads = img->rendered && img->rendered_at > g_vertex_visible_at;
     }
     if (!reads) return;
@@ -815,14 +833,14 @@ static bool s_pass_fresh_bake = false;
 
 struct ProgPairCacheSlot {
     uint64_t pv = UINT64_MAX, pf = UINT64_MAX;
-    uint64_t serial = 0;
+    uint64_t prog_gen = 0;
     std::vector<const ShaderInfo*> shaders;
     const ShaderInfo* vs = nullptr;
     const ShaderInfo* fs = nullptr;
     const ProgramLayout* layout = nullptr;
 };
-constexpr size_t kProgPairSlots = 512;
-static ProgPairCacheSlot s_prog_pair_cache[kProgPairSlots];
+constexpr size_t kProgPairBuckets = 256;
+static ProgPairCacheSlot s_prog_pair_cache[kProgPairBuckets][2];
 static uint32_t s_pass_targets_ver = 0;
 static uint32_t s_format_targets_ver = 0;
 struct MruEntry {
@@ -1089,30 +1107,39 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
 
     const uint64_t cur_pv = g_state.stage_programs[0];
     const uint64_t cur_pf = g_state.stage_programs[1];
+    const uint64_t cur_pgen = program_generation();
+    static uint64_t s_cached_pgen = 0;
     const std::vector<const ShaderInfo*>* shaders = nullptr;
     const ShaderInfo* vs = nullptr;
     const ShaderInfo* fs = nullptr;
     const ProgramLayout* layout_ptr = nullptr;
 
-    if (cur_pv == s_cached_pv && cur_pf == s_cached_pf && s_cached_shaders) {
+    if (cur_pv == s_cached_pv && cur_pf == s_cached_pf && cur_pgen == s_cached_pgen && s_cached_shaders) {
         shaders = s_cached_shaders;
         vs = s_cached_vs;
         fs = s_cached_fs;
         layout_ptr = s_cached_layout;
     } else {
-        const size_t pp_idx = (((cur_pv >> 4) ^ (cur_pv >> 13)) ^ ((cur_pf >> 3) ^ (cur_pf >> 11) * 0x9E3779B97F4A7C15ull)) & (kProgPairSlots - 1);
-        ProgPairCacheSlot& pp = s_prog_pair_cache[pp_idx];
-        if (t_replay_serial && pp.serial == t_replay_serial && pp.pv == cur_pv && pp.pf == cur_pf && !pp.shaders.empty() && pp.vs && pp.layout) {
+        const size_t pp_idx = (((cur_pv >> 4) ^ (cur_pv >> 13)) ^ ((cur_pf >> 3) ^ (cur_pf >> 11) * 0x9E3779B97F4A7C15ull)) & (kProgPairBuckets - 1);
+        ProgPairCacheSlot* pp_ways = s_prog_pair_cache[pp_idx];
+        ProgPairCacheSlot* hit_pp = nullptr;
+        if (pp_ways[0].prog_gen == cur_pgen && pp_ways[0].pv == cur_pv && pp_ways[0].pf == cur_pf && !pp_ways[0].shaders.empty() && pp_ways[0].vs && pp_ways[0].layout) {
+            hit_pp = &pp_ways[0];
+        } else if (pp_ways[1].prog_gen == cur_pgen && pp_ways[1].pv == cur_pv && pp_ways[1].pf == cur_pf && !pp_ways[1].shaders.empty() && pp_ways[1].vs && pp_ways[1].layout) {
+            hit_pp = &pp_ways[1];
+        }
+        if (hit_pp) {
             if (hidden_touch) {
-                touch_hidden_textures(pp.shaders);
+                touch_hidden_textures(hit_pp->shaders);
                 return skip_draw();
             }
-            shaders = &pp.shaders;
-            vs = pp.vs;
-            fs = pp.fs;
-            layout_ptr = pp.layout;
+            shaders = &hit_pp->shaders;
+            vs = hit_pp->vs;
+            fs = hit_pp->fs;
+            layout_ptr = hit_pp->layout;
             s_cached_pv = cur_pv;
             s_cached_pf = cur_pf;
+            s_cached_pgen = cur_pgen;
             s_cached_shaders = shaders;
             s_cached_vs = vs;
             s_cached_fs = fs;
@@ -1136,9 +1163,16 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 return skip_draw();
             }
             layout_ptr = &program_layout(*shaders);
+            ProgPairCacheSlot& dst_pp = (pp_ways[0].prog_gen != cur_pgen) ? pp_ways[0]
+                                      : (pp_ways[1].prog_gen != cur_pgen) ? pp_ways[1]
+                                                                          : pp_ways[1];
+            if (&dst_pp == &pp_ways[1] && pp_ways[0].prog_gen == cur_pgen) {
+                pp_ways[1] = std::move(pp_ways[0]);
+            }
+            ProgPairCacheSlot& pp = pp_ways[0];
             pp.pv = cur_pv;
             pp.pf = cur_pf;
-            pp.serial = t_replay_serial;
+            pp.prog_gen = cur_pgen;
             pp.shaders = *shaders;
             pp.vs = vs;
             pp.fs = fs;
@@ -1146,6 +1180,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             shaders = &pp.shaders;
             s_cached_pv = cur_pv;
             s_cached_pf = cur_pf;
+            s_cached_pgen = cur_pgen;
             s_cached_shaders = shaders;
             s_cached_vs = vs;
             s_cached_fs = fs;
@@ -1193,8 +1228,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             g_stats.total >= std::strtoull(s_dump_draw_textures_env + 17, nullptr, 10)) {
             const uint64_t tag = uint64_t(s_dump_draw_textures_done++) << 8;
             draw_end_rendering(cb, 6);
-            for (size_t k = 0; k < g_textures.resolved.size(); k++) {
-                const ResolvedTexture& r = g_textures.resolved[k];
+            for (size_t k = 0; k < g_textures.active_resolved().size(); k++) {
+                const ResolvedTexture& r = g_textures.active_resolved()[k];
                 GpuImage* img = r.texture ? image_of(r.texture) : nullptr;
                 log("draw textures %zu: texture %llx image %p %ux%u fmt %d levels %u layers %u uploaded %d rendered %d", k,
                     (unsigned long long)r.texture, (void*)img, img ? img->width : 0, img ? img->height : 0,
@@ -1225,7 +1260,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (t.depth != 0) {
             GpuImage* dimg = image_of(t.depth);
             bool sampled = false;
-            for (const ResolvedTexture& r : g_textures.resolved) {
+            for (const ResolvedTexture& r : g_textures.active_resolved()) {
                 if (r.texture && (r.gpu_image ? r.gpu_image : image_of(r.texture)) == dimg) {
                     sampled = true;
                     break;
@@ -1242,7 +1277,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             GpuImage* pimg = image_of(g_pass.depth);
             if (pimg && !clears_pending_image(pimg)) {
                 bool sampled = false;
-                for (const ResolvedTexture& r : g_textures.resolved) {
+                for (const ResolvedTexture& r : g_textures.active_resolved()) {
                     if (r.texture && (r.gpu_image ? r.gpu_image : image_of(r.texture)) == pimg) {
                         sampled = true;
                         break;
@@ -1316,7 +1351,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
     if (gathered & kSampledPending) {
         if (clears_keep_pending()) {
-            for (const ResolvedTexture& r : g_textures.resolved)
+            for (const ResolvedTexture& r : g_textures.active_resolved())
                 if (r.texture) clears_flush_reason(11), clears_flush_image(cb, r.texture);
         } else {
             clears_flush_reason(11), clears_flush(cb);
@@ -1389,31 +1424,96 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     const DynamicStateCaps& dc = vk_dynamic_caps();
     const uint32_t eff_mode = dc.primitive_topology ? canonical_topology_mode(mode) : mode;
 
-    // 64-slot (32 buckets x 2 ways = 3.5 KB L1-resident) fast pipeline table:
-    // Reuses VkPipeline across passes without constructing the 704-byte PipelineKey when target formats and state version match.
+    // 512-slot (256 buckets x 2 ways = 32 KB) fast pipeline table:
+    // Keys on a 128-bit content hash of the non-dynamic pipeline state (recomputed only when g_pipeline_state_version
+    // changes) instead of a monotonic counter so switching between mesh vertex layouts / blend states never invalidates
+    // previously cached pipelines across passes or frames.
     struct PipeMru {
         const ShaderInfo* vs = nullptr;
         const ShaderInfo* fs = nullptr;
         uint64_t formats_hash = 0;
-        uint32_t mode = 0;
-        uint32_t state_version = 0;
+        uint64_t state_hash_lo = 0;
+        uint64_t state_hash_hi = 0;
         VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        uint32_t mode = 0;
         bool indexed = false;
         bool textures_empty = false;
         bool ui_draw = false;
-        VkPipeline pipeline = VK_NULL_HANDLE;
     };
-    static constexpr size_t kPipeFastBuckets = 32;
+    static constexpr size_t kPipeFastBuckets = 64;
     static PipeMru s_pipe_mru[kPipeFastBuckets][2]{};
+    static uint32_t s_last_pipe_state_ver = 0;
+    static uint32_t s_last_attrib_ver_for_hash = 0;
+    static uint64_t s_cached_attrib_hash_lo = 0, s_cached_attrib_hash_hi = 0;
+    static uint64_t s_cached_pipe_hash_lo = 0, s_cached_pipe_hash_hi = 0;
 
-    const bool tex_empty = g_textures.bindings.empty();
+    if (replay::g_pipeline_state_version != s_last_pipe_state_ver) {
+        s_last_pipe_state_ver = replay::g_pipeline_state_version;
+        auto mix_bytes = [](const void* data, size_t len, uint64_t& h1, uint64_t& h2) {
+            const auto* p = static_cast<const uint8_t*>(data);
+            size_t i = 0;
+            for (; i + 8 <= len; i += 8) {
+                uint64_t v;
+                std::memcpy(&v, p + i, 8);
+                h1 = (h1 ^ v) * 0x100000001B3ull;
+                h2 = (h2 ^ (v * 0x9E3779B97F4A7C15ull)) * 0xC2B2AE3D27D4EB4Full ^ (h2 >> 29);
+            }
+            if (i < len) {
+                uint64_t v = 0;
+                std::memcpy(&v, p + i, len - i);
+                h1 = (h1 ^ v) * 0x100000001B3ull;
+                h2 = (h2 ^ (v * 0x9E3779B97F4A7C15ull)) * 0xC2B2AE3D27D4EB4Full ^ (h2 >> 29);
+            }
+        };
+        if (replay::g_attrib_state_version != s_last_attrib_ver_for_hash) {
+            s_last_attrib_ver_for_hash = replay::g_attrib_state_version;
+            uint64_t a1 = 0xCBF29CE484222325ull ^ g_state.attribs.size();
+            uint64_t a2 = 0x84222325CBF29CE4ull ^ (g_state.attribs.size() * 0x9E3779B97F4A7C15ull);
+            const size_t na = std::min<size_t>(g_state.attribs.size(), 16);
+            if (na) mix_bytes(g_state.attribs.data(), na * sizeof(VertexAttrib), a1, a2);
+            s_cached_attrib_hash_lo = a1;
+            s_cached_attrib_hash_hi = a2;
+        }
+        uint64_t h1 = s_cached_attrib_hash_lo;
+        uint64_t h2 = s_cached_attrib_hash_hi;
+        const size_t ns = std::min<size_t>(g_state.streams.size(), 16);
+        const uint64_t ns_tag = uint64_t(ns) | (uint64_t(s_keep_hud_alpha) << 16);
+        mix_bytes(&ns_tag, sizeof ns_tag, h1, h2);
+        if (dc.vertex_stride) {
+            uint32_t divs[16] = {};
+            for (size_t i = 0; i < ns; i++) divs[i] = g_state.streams[i].divisor;
+            if (ns) mix_bytes(divs, ns * sizeof(uint32_t), h1, h2);
+        } else if (ns) {
+            mix_bytes(g_state.streams.data(), ns * sizeof(VertexStream), h1, h2);
+        }
+        if (!dc.color_blend_equation) mix_bytes(g_state.blend, sizeof g_state.blend, h1, h2);
+        if (!dc.color_blend_enable) mix_bytes(&g_state.color, sizeof g_state.color, h1, h2);
+        if (!dc.color_write_mask) mix_bytes(&g_state.mask, sizeof g_state.mask, h1, h2);
+        if (!dc.depth_test_enable || !dc.depth_write_enable || !dc.depth_compare_op ||
+            !dc.depth_bias_enable || !dc.stencil_test_enable || !dc.stencil_op)
+            mix_bytes(&g_state.depth, sizeof g_state.depth, h1, h2);
+        if (!dc.cull_mode || !dc.front_face || !dc.polygon_mode || !dc.depth_bias_enable || !dc.stencil_op)
+            mix_bytes(&g_state.polygon, sizeof g_state.polygon, h1, h2);
+        if (!dc.primitive_restart_enable || !dc.depth_clamp_enable || !dc.alpha_to_coverage_enable) {
+            const uint32_t flags = (g_state.restart ? 1u : 0u) |
+                                   (g_state.depth_clamp ? 2u : 0u) |
+                                   (g_state.alpha_to_coverage ? 4u : 0u);
+            mix_bytes(&flags, sizeof flags, h1, h2);
+        }
+        s_cached_pipe_hash_lo = h1;
+        s_cached_pipe_hash_hi = h2;
+    }
+
+    const bool tex_empty = g_textures.active_bindings().empty();
     const bool ui_draw = live_ui_draw(tt);
     if (uw_on() && s_uw_cam_patch && !g_uw_wide && s_cached_c0_is_bgra8_rt) {
         uw_ui_vertex_shader(vs);
     }
-    const bool allow_fast_pipe = !g_uw_wide && !live_flags() && !__builtin_expect(s_uw_trace.active, 0);
+    static const bool s_diag_stats_on = std::getenv("NX_RESTART_STATS") != nullptr || std::getenv("NX_FRAME_DRAWS") != nullptr;
+    const bool allow_fast_pipe = !g_uw_wide && !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
     const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^
-                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ eff_mode) &
+                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode) &
                               (kPipeFastBuckets - 1));
     if (allow_fast_pipe) {
         PipeMru* ways = s_pipe_mru[pf_bucket];
@@ -1423,13 +1523,13 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.vs == vs &&
                 e.fs == fs &&
                 e.formats_hash == s_cached_formats_hash &&
+                e.state_hash_lo == s_cached_pipe_hash_lo &&
+                e.state_hash_hi == s_cached_pipe_hash_hi &&
                 e.mode == eff_mode &&
                 (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
-                e.state_version == replay::g_pipeline_state_version &&
-                (dc.color_write_mask && dc.color_blend_equation && dc.depth_compare_op
-                     ? true
-                     : (e.textures_empty == tex_empty && e.ui_draw == ui_draw))) {
+                e.textures_empty == tex_empty &&
+                e.ui_draw == ui_draw) {
                 pipeline = e.pipeline;
                 g_draw_prof.pipe_fast_hits++;
                 if (w == 1) std::swap(ways[0], ways[1]);
@@ -1474,7 +1574,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             bool samples_wide = false;
             const uint64_t count = indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]);
             if (count <= 6)
-                for (const ResolvedTexture& r : g_textures.resolved)
+                for (const ResolvedTexture& r : g_textures.active_resolved())
                     if (r.texture)
                         if (GpuImage* si = image_of(r.texture); si && si->uw) samples_wide = true;
             if (!samples_wide) key.uw_x = 1.0f / uw_factor();
@@ -1484,7 +1584,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 GpuImage* wi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : nullptr;
                 const Texture* tx = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
                 std::string smp;
-                for (const ResolvedTexture& r : g_textures.resolved) {
+                for (const ResolvedTexture& r : g_textures.active_resolved()) {
                     GpuImage* si = r.texture ? image_of(r.texture) : nullptr;
                     char bb[48];
                     const Texture* st = r.texture ? get<Texture>(r.texture) : nullptr;
@@ -1554,8 +1654,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (pipeline != VK_NULL_HANDLE && allow_fast_pipe) {
             PipeMru* ways = s_pipe_mru[pf_bucket];
             ways[1] = ways[0];
-            ways[0] = {vs, fs, s_cached_formats_hash, eff_mode, replay::g_pipeline_state_version, layout.layout,
-                       indexed, tex_empty, ui_draw, pipeline};
+            ways[0] = {vs, fs, s_cached_formats_hash, s_cached_pipe_hash_lo, s_cached_pipe_hash_hi,
+                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw};
         }
     }
     const uint64_t t_after_pipe = draw_fast_ticks();
@@ -1686,7 +1786,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                       ((fs && s_snap_fs.str.find(fs->hash) != std::string::npos) ||
                        s_snap_fs.str.find(vs->hash) != std::string::npos) &&
                       ++s_snap_fs_count;  // the vertex shader's hash matches too
-    if ((snap_by_fs || snap_follow(t, vs, fs, g_textures.handles) || debug_snap_wanted(g_stats.done)) && t.color_count && t.colors[0])
+    if ((snap_by_fs || snap_follow(t, vs, fs, g_textures.active_handles()) || debug_snap_wanted(g_stats.done)) && t.color_count && t.colors[0])
         if (GpuImage* snap = image_of(t.colors[0])) draw_end_rendering(cb, 6), debug_snapshot(cb, *snap, g_stats.done);
     // NX_DUMP_ON_TARGET=<hex NVNtexture*>: every NX_DUMP_FRAMES-th draw into it asks for NX_DUMP_TEXTURES to be read
     // back right after this submit (before later frames change them).
@@ -1696,10 +1796,10 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         t.colors[0] && image_of(t.colors[0]) && (s_dump_fs.any || image_of(t.colors[0])->view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
                                                            image_of(t.colors[0])->view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)) {
         debug_dump_add(t.colors[0]);
-        for (const ResolvedTexture& r : g_textures.resolved) debug_dump_add(r.texture);
+        for (const ResolvedTexture& r : g_textures.active_resolved()) debug_dump_add(r.texture);
         g_dump_request = ++g_dump_draws;
     }
-    trace_draw(t, mode, indexed, c, vs, fs, g_textures.bindings, g_textures.handles);
+    trace_draw(t, mode, indexed, c, vs, fs, g_textures.active_bindings(), g_textures.active_handles());
     g_draw_prof.bind_vk += draw_fast_ticks() - t_after_pipe;
     return true;
 }
@@ -1814,7 +1914,6 @@ std::vector<WriteBack> draw_take_write_backs() {  // an asynchronous submit copi
 
 void draw_begin_submit() {
     init_draw_env_once();
-    g_bound_serial = 0;
     s_cached_pv = UINT64_MAX, s_cached_pf = UINT64_MAX;
     s_cached_shaders = nullptr, s_cached_vs = nullptr, s_cached_fs = nullptr, s_cached_layout = nullptr;
     g_rendering = false;
@@ -1874,7 +1973,11 @@ void draw_log_stats() {
         (unsigned long long)(d_total >= d_done ? d_total - d_done : 0),
         (unsigned long long)d_btex, (unsigned long long)d_lin);
     {
-        const double inv_f = 1.0 / 600.0;
+        static uint64_t s_prev_prof_frame = 0;
+        const uint64_t cur_prof_frame = g_frame.load(std::memory_order_relaxed);
+        const uint64_t d_frames = std::max<uint64_t>(1, cur_prof_frame - s_prev_prof_frame);
+        s_prev_prof_frame = cur_prof_frame;
+        const double inv_f = 1.0 / double(d_frames);
         const double p_prog = draw_ticks_to_ms(g_draw_prof.prog) * inv_f;
         const double p_tex = draw_ticks_to_ms(g_draw_prof.tex) * inv_f;
         const double p_pass = draw_ticks_to_ms(g_draw_prof.pass) * inv_f;
@@ -1886,8 +1989,8 @@ void draw_log_stats() {
         const double p_occl = draw_ticks_to_ms(g_draw_prof.occl_skip) * inv_f;
         const double p_uub = draw_ticks_to_ms(g_draw_prof.uub) * inv_f;
         const double p_sum = p_prog + p_tex + p_pass + p_sets + p_in + p_pipe + p_bvk;
-        log("nvn profile (ms/frame over 600): draw %.2f (prog %.2f, tex %.2f, pass %.2f, build_sets %.2f, inputs %.2f, pipe %.2f, bind+vk %.2f), dispatch %.2f, occl_skip %.2f, uub %.2f | pipe hits: fast %llu, mru8 %llu, full %llu",
-            p_sum, p_prog, p_tex, p_pass, p_sets, p_in, p_pipe, p_bvk, p_disp, p_occl, p_uub,
+        log("nvn profile (ms/frame over %llu): draw %.2f (prog %.2f, tex %.2f, pass %.2f, build_sets %.2f, inputs %.2f, pipe %.2f, bind+vk %.2f), dispatch %.2f, occl_skip %.2f, uub %.2f | pipe hits: fast %llu, mru8 %llu, full %llu",
+            (unsigned long long)d_frames, p_sum, p_prog, p_tex, p_pass, p_sets, p_in, p_pipe, p_bvk, p_disp, p_occl, p_uub,
             (unsigned long long)g_draw_prof.pipe_fast_hits,
             (unsigned long long)g_draw_prof.pipe_mru_hits,
             (unsigned long long)g_draw_prof.pipe_full_hits);

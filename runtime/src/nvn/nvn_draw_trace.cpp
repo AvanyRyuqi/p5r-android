@@ -445,7 +445,7 @@ void trace_draw(const Targets& t, uint32_t mode, bool indexed, const Cmd& c, con
     if (draws_trace_due() || hud_dump) draw_trace_line(t, indexed, c, vs, fs, tex_bindings, handles);
     if (hud_dump) {
         std::vector<uint64_t> sampled;
-        for (const ResolvedTexture& r : g_textures.resolved)
+        for (const ResolvedTexture& r : g_textures.active_resolved())
             if (r.texture) sampled.push_back(r.texture);
         debug_hud_note(t.color_count ? t.colors[0] : 0, sampled);
     }

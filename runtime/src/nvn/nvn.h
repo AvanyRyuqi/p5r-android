@@ -426,6 +426,7 @@ uint64_t gpu_write_back_serial();  // the last submit that writes guest memory (
 // Programs: the translated stages bound by nvnProgramSetShaders (nvn_program.cpp; ShaderInfo in nvn_shaders.h).
 struct ShaderInfo;
 const std::vector<const ShaderInfo*>* program_shaders(uint64_t program);
+uint64_t program_generation();
 
 // A format's block (width, height in texels; bytes), from the SDK driver's format table (nvn_texture_layout.cpp).
 // NX_DROPOUTS (nvn_state.cpp): the CPU-side frame count, at each nvnQueuePresentTexture.
