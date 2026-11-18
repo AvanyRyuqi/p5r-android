@@ -176,6 +176,26 @@ uint64_t fast_sample_hash(const uint8_t* p, uint64_t size) {
     return h;
 }
 
+static inline uint64_t fast_ticks() {
+#if defined(__aarch64__)
+    uint64_t v;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return plat::monotonic_ns();
+#endif
+}
+
+static inline double ticks_to_ms(uint64_t ticks) {
+#if defined(__aarch64__)
+    uint64_t f;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f ? (double(ticks) * 1000.0 / double(f)) : 0.0;
+#else
+    return double(ticks) / 1e6;
+#endif
+}
+
 struct Retired {
     uint64_t serial;
     Slot slot;
@@ -381,7 +401,9 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
         Entry& e = *found_entry;
         const bool is_3d_geom = g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex);
         if (!verify && e.size == size && e.padded == padded && e.block < g_blocks.size() &&
-            g_blocks[e.block].buffer != VK_NULL_HANDLE && e.last_verified_submit == g_submits) {
+            g_blocks[e.block].buffer != VK_NULL_HANDLE &&
+            (e.last_verified_submit == g_submits ||
+             (is_3d_geom && e.verified_streak >= 3 && cur_frame == e.last_verified_frame))) {
             e.serial = std::max(e.serial, frame_recording_serial());
             e.seen = g_submits;
             g_stats_cache.hits++;
@@ -390,7 +412,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
             return true;
         }
 
-        const uint64_t t0 = time_hash ? plat::monotonic_ns() : 0;
+        const uint64_t t0 = fast_ticks();
         const bool can_sample = (is_3d_geom && size > 512 && e.verified_streak >= 3);
         bool match = false;
         if (can_sample) {
@@ -400,11 +422,11 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
             uint64_t h = full_hash_memory(p, size);
             match = (e.size == size && e.padded == padded && e.hash == h);
         }
-        if (time_hash) g_stats_cache.hash_ns += plat::monotonic_ns() - t0;
+        g_stats_cache.hash_ns += fast_ticks() - t0;
 
         if (match) {
             e.last_verified_submit = g_submits;
-            e.last_verified_frame = is_3d_geom ? (cur_frame + ((reinterpret_cast<uintptr_t>(p) >> 8) & 7ull)) : cur_frame;
+            e.last_verified_frame = cur_frame;
             if (e.verified_streak < 1000) e.verified_streak++;
             // NX_BUFFER_CACHE_VERIFY=1: every hit compared with the guest bytes (slow: the copy is uncached memory).
             if (verify && std::memcmp(g_blocks[e.block].ptr + e.offset, p, size) != 0) {
@@ -451,10 +473,10 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
         return false;
     }
 
-    const uint64_t t0 = time_hash ? plat::monotonic_ns() : 0;
-    const bool is_3d_cand = g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex);
-    const uint64_t sh = is_3d_cand ? fast_sample_hash(p, size) : full_hash_memory(p, size);
-    if (time_hash) g_stats_cache.hash_ns += plat::monotonic_ns() - t0;
+    const uint64_t t0 = fast_ticks();
+    const bool use_sample_cand = (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex) && size > 512;
+    const uint64_t sh = use_sample_cand ? fast_sample_hash(p, size) : full_hash_memory(p, size);
+    g_stats_cache.hash_ns += fast_ticks() - t0;
 
     const uint64_t serial = frame_recording_serial();
     if (seen.p != p) {
@@ -491,16 +513,17 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
     }
     seen = {};
     if (g_unstable_front[u_idx].p == p) g_unstable_front[u_idx].p = nullptr;
-    const uint64_t t1 = (time_hash && is_3d_cand && size > 192) ? plat::monotonic_ns() : 0;
-    const uint64_t h = (is_3d_cand && size > 192) ? full_hash_memory(p, size) : sh;
-    if (time_hash && is_3d_cand && size > 192) g_stats_cache.hash_ns += plat::monotonic_ns() - t1;
+    const uint64_t t1 = use_sample_cand ? fast_ticks() : 0;
+    const uint64_t h = use_sample_cand ? full_hash_memory(p, size) : sh;
+    if (use_sample_cand) g_stats_cache.hash_ns += fast_ticks() - t1;
+    const uint64_t sample_h = use_sample_cand ? sh : ((size > 512) ? fast_sample_hash(p, size) : h);
     g_used += class_bytes(c);
     uint8_t* dst = g_blocks[slot.block].ptr + slot.offset;
     frame_guest_read(p, size);
     plat::fast_memcpy(dst, p, size);
     if (padded > size) std::memset(dst + size, 0, padded - size);
     auto [ins_it, inserted] = g_entries.insert_or_assign(
-        p, Entry{size, padded, h, sh, slot.block, slot.offset, c, 1, serial, g_submits, g_submits, cur_frame});
+        p, Entry{size, padded, h, sample_h, slot.block, slot.offset, c, 1, serial, g_submits, g_submits, cur_frame});
     if (inserted && pc.cached_count < UINT16_MAX) {
         pc.cached_count++;
         pc.cached_bloom |= page_bloom_bit(p);
@@ -521,7 +544,7 @@ void cache_log() {
             (unsigned long long)s.hits, double(s.hit_bytes) / 1e6, (unsigned long long)s.misses,
             double(s.miss_bytes) / 1e6, (unsigned long long)s.unstable, (unsigned long long)s.full,
             (unsigned long long)s.evicted,
-            double(s.hash_ns) / 1e6, g_entries.size(), double(g_used) / 1e6, size_t(g_blocks.size() * kBlock >> 20),
+            ticks_to_ms(s.hash_ns), g_entries.size(), double(g_used) / 1e6, size_t(g_blocks.size() * kBlock >> 20),
             s.wrong ? "; HITS THAT DIFFER (NX_BUFFER_CACHE_VERIFY)" : "");
     s = {};
 }

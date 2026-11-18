@@ -15,6 +15,7 @@ struct GpuImage {
     // NX_TEX_AUDIT (nvn_pipeline.cpp tex_audit): a hash of the guest memory its last upload read, and when it was
     // checked. On the image, so textures that share it (same memory) are compared with what it holds.
     uint64_t audit_hash = 0, audit_frame = 0;
+    uint64_t upload_sample_hash = 0, upload_storage_size = 0, last_memory = 0;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;  // every level and layer
@@ -25,7 +26,8 @@ struct GpuImage {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool rendered = false;  // written by the GPU: never re-uploaded from guest memory
     bool uploaded = false;  // filled from the texture's pool memory
-    bool retired = false;   // owner texture finalized or re-initialized: never shared with new textures via g_live_images
+    bool retired = false;   // owner texture finalized or re-initialized
+    bool in_free_pool = false;
     // Given texels by nvnTextureWriteTexels: those never reach guest memory here, so it is not uploaded from there
     // again (a pool flush over it wiped the light probes' direction map, docs/nvn/DEBUG.md #49).
     bool texels = false;
@@ -278,6 +280,8 @@ void free_retired_images(uint64_t completed);
 // A GPU-written image of a destroyed texture with the same memory and shape (nvn_frames.cpp), or null.
 std::shared_ptr<GpuImage> reuse_image(const Texture& t);  // images of textures destroyed before submit `completed` + 1
 std::shared_ptr<GpuImage> take_free_image(const GpuImage& proto);
+bool claim_free_image(const std::shared_ptr<GpuImage>& img);
+uint64_t tex_sample_hash(const uint8_t* p, uint64_t size);
 
 // nvn_debug.cpp: NX_DUMP_FRAMES, the presented texture read back (recorded into the present's command buffer, written
 // after its fence).

@@ -273,8 +273,13 @@ void SyncWait(CPU& c) {
 void QueueInitialize(CPU& c) { c.x[0] = 1; }  // NVNboolean (NVNqueue*, const NVNqueueBuilder*)
 void QueueFinalize(CPU&) {}
 void QueueSubmitCommands(CPU& c) {  // (NVNqueue*, int count, const NVNcommandHandle*)
-    if (KThread* self = self_thread(); self && self->is_replay) {
-        plat::perf_hint_thread();  // only the presenting/replay thread joins ADPF (perf_hint.cpp)
+    if (KThread* self = self_thread(); self) {
+        if (!self->is_replay) {
+            self->is_replay = true;
+            plat::set_thread_priority(-10);
+            plat::place_fast_cores();
+        }
+        plat::perf_hint_thread();  // any submitting/replay thread joins ADPF (perf_hint.cpp)
     }
     std::vector<std::shared_ptr<CmdList>> lists;
     lists.reserve(uint32_t(c.x[1]));

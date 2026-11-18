@@ -99,12 +99,13 @@ ViewInfo read_view(CPU& c, uint64_t view) {
 
 uint64_t pool_host(const MemoryPool& pool, uint64_t offset) {
     if (pool.memory) return pool.memory + offset;
-    std::lock_guard lk(objects_lock());
+    std::shared_lock lk(objects_lock());
     auto it = pool.mappings.upper_bound(offset);
     if (it == pool.mappings.begin()) return 0;
     --it;
     if (offset - it->first >= it->second.size) return 0;
-    auto* phys = dynamic_cast<MemoryPool*>(objects().count(it->second.physical) ? objects()[it->second.physical].get() : nullptr);
+    auto o = objects().find(it->second.physical);
+    auto* phys = o == objects().end() ? nullptr : dynamic_cast<MemoryPool*>(o->second.get());
     return phys && phys->memory ? phys->memory + it->second.physical_offset + (offset - it->first) : 0;
 }
 
@@ -193,7 +194,7 @@ std::map<uint64_t, std::set<uint64_t>>& pool_textures() {
 // (NVNmemoryPool*, ptrdiff_t offset, size_t size)
 void MemoryPoolFlushMappedRange(CPU& c) {
     uint64_t pool = c.x[0], off = c.x[1], size = c.x[2];
-    std::lock_guard lk(objects_lock());
+    std::shared_lock lk(objects_lock());
     auto it = pool_textures().find(pool);
     if (it == pool_textures().end()) return;
     for (uint64_t guest : it->second) {

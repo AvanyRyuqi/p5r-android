@@ -163,17 +163,28 @@ GpuImage* image_of(uint64_t guest) {
     bool widened = t->format == 0x1 && t->pool_swizzle == 0x02010101u;
     if (share && t->memory && (old_rule ? t->pool_swizzle == 0 : !widened))
         if (auto it = g_live_images.find(key); it != g_live_images.end())
-            if (auto shared = it->second.lock(); shared && shared->image && !shared->alpha_from_r && !shared->retired) {
+            if (auto shared = it->second.lock(); shared && shared->image && !shared->alpha_from_r &&
+                                                 !(shared->rendered && shared->retired)) {
+                if (shared->in_free_pool) claim_free_image(shared);
                 static uint64_t shares = 0;
                 if (++shares % 1000 == 1) log("nvn/vk: %llu textures shared an image with another", (unsigned long long)shares);
+                shared->retired = false;
                 t->image = shared;
-                // A texture made again over memory another live object still covers (or whose finalized owner is still
-                // held in defer_object / g_grave across g_max_replays): the image holds what that earlier texture
-                // uploaded, while guest pool memory now holds the new texture's texels. Mark non-rendered shared images
-                // dirty so block-linear streamed textures (Shibuya foliage/UI/character maps) re-upload instead of
-                // displaying stale normal/mask textures. NX_SHARE_KEEP=1: as before.
+                // A texture made again over memory another live object still covers (or whose finalized owner was kept
+                // in defer_object / g_grave / g_free_images): compare a fast 192-byte sample hash of guest pool memory
+                // against what the image uploaded. If the bytes match (e.g. Quick Travel / Pause menu UI textures
+                // re-initialized at the same pool address), reuse the uploaded GpuImage with zero untiling and zero
+                // pass breaks; if the bytes differ (e.g. Shibuya streaming new foliage over a destroyed normal map,
+                // Issue #269), mark dirty so ensure_contents() re-uploads the new texels.
                 static const bool keep = std::getenv("NX_SHARE_KEEP") != nullptr;
-                if (!keep && !shared->rendered) t->mark_dirty(0, UINT64_MAX);
+                if (!keep && !shared->rendered) {
+                    const bool unchanged = !t->stride && t->memory && t->storage_size && shared->uploaded &&
+                                           shared->upload_storage_size == t->storage_size &&
+                                           shared->upload_sample_hash != 0 &&
+                                           shared->upload_sample_hash ==
+                                               tex_sample_hash(reinterpret_cast<const uint8_t*>(t->memory), t->storage_size);
+                    if (!unchanged) t->mark_dirty(0, UINT64_MAX);
+                }
                 return shared.get();
             }
     if ((t->image = reuse_image(*t))) return t->image.get();

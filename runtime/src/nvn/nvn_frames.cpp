@@ -1022,16 +1022,10 @@ void free_retired_images(uint64_t completed) {
         if (!img || !img->image) continue;
         if (img.use_count() > 1) continue;  // another live texture shares it (image_of): freed with the last one
         if (!img->rendered && img->memory && img->view) {
-            forget_image_views(*img, true);
             std::lock_guard lk(g_grave_lock);
             if (g_free_image_count < kMaxFreeImages) {
-                auto pooled = std::make_shared<GpuImage>(*img);
-                img->image = VK_NULL_HANDLE, img->memory = VK_NULL_HANDLE, img->view = VK_NULL_HANDLE;
-                pooled->audit_hash = pooled->audit_frame = 0;
-                pooled->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-                pooled->rendered = pooled->uploaded = pooled->texels = pooled->retired = false;
-                pooled->rendered_at = 0;
-                g_free_images[free_image_key(*pooled)].push_back(std::move(pooled));
+                img->in_free_pool = true;
+                g_free_images[free_image_key(*img)].push_back(std::move(img));
                 g_free_image_count++;
                 continue;
             }
@@ -1044,6 +1038,30 @@ void free_retired_images(uint64_t completed) {
     }
 }
 
+bool claim_free_image(const std::shared_ptr<GpuImage>& img) {
+    if (!img) return false;
+    std::lock_guard lk(g_grave_lock);
+    if (!img->in_free_pool) return true;
+    auto it = g_free_images.find(free_image_key(*img));
+    if (it != g_free_images.end()) {
+        auto& vec = it->second;
+        for (size_t i = 0; i < vec.size(); i++) {
+            if (vec[i].get() == img.get()) {
+                vec.erase(vec.begin() + i);
+                if (vec.empty()) g_free_images.erase(it);
+                if (g_free_image_count > 0) g_free_image_count--;
+                img->in_free_pool = false;
+                img->retired = false;
+                g_reused++;
+                return true;
+            }
+        }
+    }
+    img->in_free_pool = false;
+    img->retired = false;
+    return true;
+}
+
 std::shared_ptr<GpuImage> take_free_image(const GpuImage& proto) {
     std::shared_ptr<GpuImage> img;
     {
@@ -1054,9 +1072,15 @@ std::shared_ptr<GpuImage> take_free_image(const GpuImage& proto) {
         it->second.pop_back();
         if (it->second.empty()) g_free_images.erase(it);
         if (g_free_image_count > 0) g_free_image_count--;
+        img->in_free_pool = false;
         g_reused++;
     }
     forget_image_views(*img, true);
+    img->audit_hash = img->audit_frame = 0;
+    img->upload_sample_hash = img->upload_storage_size = img->last_memory = 0;
+    img->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    img->rendered = img->uploaded = img->texels = img->retired = false;
+    img->rendered_at = 0;
     return img;
 }
 
