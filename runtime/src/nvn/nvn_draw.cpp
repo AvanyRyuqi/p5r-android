@@ -807,13 +807,15 @@ inline void effective_draw_state_overrides(const Targets& t, bool tex_empty, Ble
     out_mask = g_state.mask;
     for (uint32_t k = 0; k < 8; k++) out_mask.mask[k] &= 0xF;
     out_depth = g_state.depth;
-    if (s_keep_hud_alpha && g_state.color.blend_enable[0] && (out_mask.mask[0] & 0xF) == 0xF && live_ui_draw(t) &&
+    const bool ui = live_ui_draw(t);
+    if (ui && out_depth.depth_func == 3 && !out_depth.depth_write) out_depth.depth_func = 0x83;
+    if (s_keep_hud_alpha && g_state.color.blend_enable[0] && (out_mask.mask[0] & 0xF) == 0xF && ui &&
         (s_keep_hud_alpha == 2 || !tex_empty)) {
         const BlendTarget& b = out_blend[0];
         if (b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6 && b.eq_rgb <= 1 && b.eq_a <= 1)
             out_mask.mask[0] &= 7;
     }
-    if (const uint32_t live = live_flags(); live && live_ui_draw(t)) {
+    if (const uint32_t live = live_flags(); live && ui) {
         if (live & kLiveUiAlways) out_depth.depth_func = 8;  // NVN ALWAYS
         if (live & kLiveUiNoWrite) out_depth.depth_write = 0;
         if (live & kLiveUiRgb) out_mask.mask[0] &= 7;
@@ -871,9 +873,12 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     const bool need_blend_override = (cnt > 0 && (dc.color_blend_equation || dc.color_write_mask));
     if (need_blend_override) {
         effective_draw_state_overrides(t, tex_empty, eff_blend, eff_mask, eff_depth);
-    } else if (live_flags() && live_ui_draw(t)) {
-        if (live_flags() & kLiveUiAlways) eff_depth.depth_func = 8;
-        if (live_flags() & kLiveUiNoWrite) eff_depth.depth_write = 0;
+    } else if (live_ui_draw(t)) {
+        if (eff_depth.depth_func == 3 && !eff_depth.depth_write) eff_depth.depth_func = 0x83;
+        if (const uint32_t live = live_flags()) {
+            if (live & kLiveUiAlways) eff_depth.depth_func = 8;
+            if (live & kLiveUiNoWrite) eff_depth.depth_write = 0;
+        }
     }
 
     uint32_t bias[4];
