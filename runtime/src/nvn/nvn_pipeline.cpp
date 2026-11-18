@@ -1429,7 +1429,7 @@ static uint64_t g_view_forget_serial = 1;
 uint64_t view_forget_serial() { return g_view_forget_serial; }
 
 void forget_image_views(const GpuImage& img, bool keep_default_view) {
-    bool dropped_any = true;
+    bool dropped_any = !keep_default_view;
     // The caches are ordered by image first: its views are one run from the smallest key with that image (this was
     // a scan of every cached view per destroyed texture, a visible share of the replay time).
     auto drop = [&](auto& cache, auto lowest) {

@@ -229,8 +229,8 @@ constexpr size_t kBlocks = 256;  // was 32: prevents >32 skinned vertex SSBO sta
 std::vector<std::unique_ptr<SupportBlock>> g_support;
 std::vector<std::unique_ptr<ConstantsBlock>> g_constants;
 size_t g_support_used = 0, g_constants_used = 0;
-static thread_local ConstantsBlock* s_last_const_block[2] = {};
-static thread_local uint32_t s_last_const_block_ver[2] = {};
+static ConstantsBlock* s_last_const_block[2] = {};
+static uint32_t s_last_const_block_ver[2] = {};
 
 const SupportBuffer* support_block(float width, float height, float scale) {
     for (size_t k = 0; k < g_support_used; k++)
@@ -450,10 +450,10 @@ static bool set2_reuse_on() {
     return st != 0;
 }
 
-static thread_local VkDescriptorSetLayout s_last_set2_layout = VK_NULL_HANDLE;
-static thread_local uint64_t s_last_set2_gen = 0;
-static thread_local VkDescriptorSet s_last_set2 = VK_NULL_HANDLE;
-static thread_local uint64_t s_last_set2_serial = ~0ull;  // g_textures.serial the stored set was built for
+static VkDescriptorSetLayout s_last_set2_layout = VK_NULL_HANDLE;
+static uint64_t s_last_set2_gen = 0;
+static VkDescriptorSet s_last_set2 = VK_NULL_HANDLE;
+static uint64_t s_last_set2_serial = ~0ull;  // g_textures.serial the stored set was built for
 
 struct LastResolvedSet {
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
@@ -463,7 +463,7 @@ struct LastResolvedSet {
     uint32_t arena_at = 0, arena_n = 0;
 };
 constexpr uint32_t kLastResolvedSlots = 512;
-static thread_local LastResolvedSet s_last_resolved[4][kLastResolvedSlots][2];
+static LastResolvedSet s_last_resolved[4][kLastResolvedSlots][2];
 
 struct ShaderTexBindingsSlot {
     const ShaderInfo* sh0 = nullptr;
@@ -485,8 +485,8 @@ struct ShaderTexBindingsSlot {
     uint64_t last_set2_serial = ~0ull;
 };
 constexpr size_t kShaderTexSlots = 512;
-static thread_local ShaderTexBindingsSlot s_sh_cache[kShaderTexSlots];
-static thread_local ShaderTexBindingsSlot* s_active_sh_slot = nullptr;
+static ShaderTexBindingsSlot s_sh_cache[kShaderTexSlots];
+static ShaderTexBindingsSlot* s_active_sh_slot = nullptr;
 
 struct SlotBufferCache {
     uint64_t address = 0;
@@ -498,24 +498,28 @@ struct SlotBufferCache {
     bool overlaps = false;
     VkDescriptorBufferInfo info{};
 };
-static thread_local SlotBufferCache s_ubo_cache[2][18] = {};
-static thread_local SlotBufferCache s_ssbo_cache[2][16] = {};
-static thread_local uint32_t s_ubo_valid_mask[2] = {};
-static thread_local uint32_t s_ssbo_valid_mask[2] = {};
+static SlotBufferCache s_ubo_cache[2][18] = {};
+static SlotBufferCache s_ssbo_cache[2][16] = {};
+static uint32_t s_ubo_valid_mask[2] = {};
+static uint32_t s_ssbo_valid_mask[2] = {};
+static const uint8_t* s_ubo_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+static const uint8_t* s_ubo_hi = nullptr;
+static const uint8_t* s_ssbo_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+static const uint8_t* s_ssbo_hi = nullptr;
 
 struct SupportUploadCache {
     float vw = -1.0f, vh = -1.0f, scale = -1.0f;
     uint64_t gen = 0;
     VkDescriptorBufferInfo info{};
 };
-static thread_local SupportUploadCache s_support_cache{};
+static SupportUploadCache s_support_cache{};
 
 struct ConstDataCache {
     const ShaderInfo* shader = nullptr;
     uint64_t gen = 0;
     VkDescriptorBufferInfo info{};
 };
-static thread_local ConstDataCache s_const_data_cache[2]{};
+static ConstDataCache s_const_data_cache[2]{};
 
 // d.sets from the cache or newly made, the writes of the cached ones dropped and the rest pointed at their new sets.
 void resolve_sets(const ProgramLayout& layout) {
@@ -847,6 +851,8 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
                     if (shared && st < 2 && b.nvn.index >= 0 && b.nvn.index < 18 && r.address && p) {
                         s_ubo_cache[st][b.nvn.index] = {r.address, p, copy_sz, r.size, want_min, cur_gen, false, info};
                         s_ubo_valid_mask[st] |= (1u << b.nvn.index);
+                        if (p < s_ubo_lo) s_ubo_lo = p;
+                        if (p + copy_sz > s_ubo_hi) s_ubo_hi = p + copy_sz;
                     }
                     break;
                 }
@@ -873,6 +879,8 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
                     if (shared && !written && s->stage != ShaderStage::Compute && st < 2 && b.nvn.index >= 0 && b.nvn.index < 16 && r.address && p) {
                         s_ssbo_cache[st][b.nvn.index] = {r.address, p, size, r.size, want_min, cur_gen, ov, info};
                         s_ssbo_valid_mask[st] |= (1u << b.nvn.index);
+                        if (p < s_ssbo_lo) s_ssbo_lo = p;
+                        if (p + size > s_ssbo_hi) s_ssbo_hi = p + size;
                     }
                     break;
                 }
@@ -1138,20 +1146,20 @@ void bind_sets(VkCommandBuffer cb, VkPipelineBindPoint point, const ProgramLayou
 
 // Texture bindings of a program's stages and their handles, into g_textures. kNeedBreak: one needs a transfer or a
 // layout change (so no render pass may be open while the sets are built); kSampledPending: one has a pending clear.
-static thread_local const ShaderInfo* s_cached_sh0 = nullptr;
-static thread_local const ShaderInfo* s_cached_sh1 = nullptr;
-static thread_local size_t s_cached_sh_count = 0;
-static thread_local uint32_t s_cached_need_break = 0;
-static thread_local bool s_cached_biased = false;
-static thread_local uint64_t s_cached_tex_pool = 0;
-static thread_local uint64_t s_cached_smp_pool = 0;
-static thread_local bool s_cached_has_uniform_handle = false;
-static thread_local bool s_cached_all_fast_ready = false;
-static thread_local uint64_t s_cached_fast_ready_frame = 0;
-static thread_local uint32_t s_cached_tex_version = 0;
-static thread_local uint64_t s_cached_pass_serial = UINT64_MAX;
-static thread_local uint32_t s_cached_pass_written = UINT32_MAX;
-static thread_local uint64_t s_cached_vf_serial = 0;
+static const ShaderInfo* s_cached_sh0 = nullptr;
+static const ShaderInfo* s_cached_sh1 = nullptr;
+static size_t s_cached_sh_count = 0;
+static uint32_t s_cached_need_break = 0;
+static bool s_cached_biased = false;
+static uint64_t s_cached_tex_pool = 0;
+static uint64_t s_cached_smp_pool = 0;
+static bool s_cached_has_uniform_handle = false;
+static bool s_cached_all_fast_ready = false;
+static uint64_t s_cached_fast_ready_frame = 0;
+static uint32_t s_cached_tex_version = 0;
+static uint64_t s_cached_pass_serial = UINT64_MAX;
+static uint32_t s_cached_pass_written = UINT32_MAX;
+static uint64_t s_cached_vf_serial = 0;
 
 // Lightweight touch for hidden/occluded draws (!g_state.render_enable): marks bound textures as sampled so
 // expire_kept() retains them, without mutating g_textures, s_sh_cache, or descriptor set serials.
@@ -1451,8 +1459,8 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
 
 // The zero stream (vertex binding 15): one per submit instead of 64 bytes per draw. Host bytes that never change, so
 // dedup may share them.
-static thread_local Upload s_cached_zero_stream{};
-static thread_local bool s_cached_zero_valid = false;
+static Upload s_cached_zero_stream{};
+static bool s_cached_zero_valid = false;
 
 Upload zero_stream() {
     if (__builtin_expect(s_cached_zero_valid, 1)) return s_cached_zero_stream;
@@ -1479,10 +1487,21 @@ constexpr size_t kIndexCacheSlots = 512;
 static LastIndexEntry s_index_cache[kIndexCacheSlots];
 static uint64_t s_index_valid_words[kIndexCacheSlots / 64] = {};
 static uint32_t s_index_group_mask = 0;
+static const uint8_t* s_index_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+static const uint8_t* s_index_hi = nullptr;
+static uint64_t s_index_page_bloom = 0;
+
+inline uint64_t index_bloom_bit(const uint8_t* p) {
+    const uintptr_t pg = reinterpret_cast<uintptr_t>(p) >> 16;
+    return 1ull << ((pg ^ (pg >> 6)) & 63);
+}
 
 void index_cache_invalidate(const uint8_t* p, uint64_t size) {
-    if (!p || !size || !s_index_group_mask) return;
+    if (!p || !size || !s_index_group_mask || p >= s_index_hi || p + size <= s_index_lo) return;
     const uint8_t* p_end = p + size;
+    if ((reinterpret_cast<uintptr_t>(p) >> 16) == ((reinterpret_cast<uintptr_t>(p_end) - 1) >> 16) &&
+        !(s_index_page_bloom & index_bloom_bit(p)))
+        return;
     uint32_t gm = s_index_group_mask;
     while (gm) {
         const size_t w = uint32_t(__builtin_ctz(gm));
@@ -1505,29 +1524,38 @@ void index_cache_invalidate(const uint8_t* p, uint64_t size) {
 }
 
 void sets_invalidate_range(const uint8_t* p, uint64_t size) {
-    if (!p || !size || !(s_ubo_valid_mask[0] | s_ubo_valid_mask[1] | s_ssbo_valid_mask[0] | s_ssbo_valid_mask[1])) return;
+    if (!p || !size) return;
     const uint8_t* p_end = p + size;
-    for (int st = 0; st < 2; st++) {
-        uint32_t um = s_ubo_valid_mask[st];
-        while (um) {
-            const int i = __builtin_ctz(um);
-            um &= um - 1;
-            SlotBufferCache& s = s_ubo_cache[st][i];
-            if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
-                s.address = 0;
-                s.host_p = nullptr;
-                s_ubo_valid_mask[st] &= ~(1u << i);
+    const bool check_ubo = (s_ubo_valid_mask[0] | s_ubo_valid_mask[1]) && p < s_ubo_hi && p_end > s_ubo_lo;
+    const bool check_ssbo = (s_ssbo_valid_mask[0] | s_ssbo_valid_mask[1]) && p < s_ssbo_hi && p_end > s_ssbo_lo;
+    if (!check_ubo && !check_ssbo) return;
+    if (check_ubo) {
+        for (int st = 0; st < 2; st++) {
+            uint32_t um = s_ubo_valid_mask[st];
+            while (um) {
+                const int i = __builtin_ctz(um);
+                um &= um - 1;
+                SlotBufferCache& s = s_ubo_cache[st][i];
+                if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
+                    s.address = 0;
+                    s.host_p = nullptr;
+                    s_ubo_valid_mask[st] &= ~(1u << i);
+                }
             }
         }
-        uint32_t sm = s_ssbo_valid_mask[st];
-        while (sm) {
-            const int i = __builtin_ctz(sm);
-            sm &= sm - 1;
-            SlotBufferCache& s = s_ssbo_cache[st][i];
-            if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
-                s.address = 0;
-                s.host_p = nullptr;
-                s_ssbo_valid_mask[st] &= ~(1u << i);
+    }
+    if (check_ssbo) {
+        for (int st = 0; st < 2; st++) {
+            uint32_t sm = s_ssbo_valid_mask[st];
+            while (sm) {
+                const int i = __builtin_ctz(sm);
+                sm &= sm - 1;
+                SlotBufferCache& s = s_ssbo_cache[st][i];
+                if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
+                    s.address = 0;
+                    s.host_p = nullptr;
+                    s_ssbo_valid_mask[st] &= ~(1u << i);
+                }
             }
         }
     }
@@ -1572,6 +1600,12 @@ bool draw_inputs_shared(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, 
     const size_t w = put_idx >> 6;
     s_index_valid_words[w] |= 1ull << (put_idx & 63);
     s_index_group_mask |= 1u << w;
+    if (p < s_index_lo) s_index_lo = p;
+    if (p + bytes > s_index_hi) s_index_hi = p + bytes;
+    if ((reinterpret_cast<uintptr_t>(p) >> 16) == ((reinterpret_cast<uintptr_t>(p + bytes) - 1) >> 16))
+        s_index_page_bloom |= index_bloom_bit(p);
+    else
+        s_index_page_bloom = ~0ull;
     return true;
 }
 
@@ -1614,9 +1648,14 @@ void sets_begin_submit() {
     s_last_const_block_ver[0] = s_last_const_block_ver[1] = 0;
     s_ubo_valid_mask[0] = s_ubo_valid_mask[1] = 0;
     s_ssbo_valid_mask[0] = s_ssbo_valid_mask[1] = 0;
+    s_ubo_lo = s_ssbo_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+    s_ubo_hi = s_ssbo_hi = nullptr;
     if (s_index_group_mask) {
         std::memset(s_index_valid_words, 0, sizeof s_index_valid_words);
         s_index_group_mask = 0;
+        s_index_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+        s_index_hi = nullptr;
+        s_index_page_bloom = 0;
     }
     s_support_cache.gen = 0;
     s_const_data_cache[0].gen = s_const_data_cache[1].gen = 0;
@@ -1632,12 +1671,10 @@ void sets_begin_submit() {
     static uint64_t s_last_desc_epoch = 0;
     static uint64_t s_last_ssbo_epoch = 0;
     const uint64_t vf_ser = view_forget_serial();
-    if (vf_ser != s_last_vf_serial) {
-        std::memset(s_last_resolved, 0, sizeof s_last_resolved);
-    }
-    const bool force_rotate = (vf_ser != s_last_vf_serial) || (g_set_used >= kSetSlots / 2);
+    const bool force_rotate = (g_set_used >= kSetSlots / 2);
     const uint64_t desc_epoch = frame_descriptor_epoch(force_rotate);
-    if (desc_epoch != s_last_desc_epoch) {
+    if (desc_epoch != s_last_desc_epoch || vf_ser != s_last_vf_serial) {
+        std::memset(s_last_resolved, 0, sizeof s_last_resolved);
         if (g_set_arena.capacity() < 65536) g_set_arena.reserve(65536);
         g_set_generation++, g_set_used = 0, g_set_arena.clear();
         s_last_desc_epoch = desc_epoch;

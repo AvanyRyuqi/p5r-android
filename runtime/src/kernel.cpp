@@ -91,6 +91,10 @@ void repin_guest_workers_to_little_cores(int64_t replay_tid) {
             t->is_replay = true;
             continue;
         }
+        if (t->is_replay) {
+            plat::pin_thread_tid_to_big_cores(t->host_tid, -10);
+            continue;
+        }
         if (t->id == 0x50) {
             t->is_replay = false;
             plat::pin_thread_tid_to_big_cores(t->host_tid, -4);

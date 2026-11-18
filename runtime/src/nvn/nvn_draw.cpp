@@ -404,11 +404,48 @@ const std::vector<const ShaderInfo*>* bound_shaders() {
     return bound_graphics_shaders(g_bound_shaders);
 }
 
+static inline uint64_t draw_fast_ticks() {
+#if defined(__aarch64__)
+    uint64_t v;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return plat::monotonic_ns();
+#endif
+}
+
+static inline double draw_ticks_to_ms(uint64_t ticks) {
+#if defined(__aarch64__)
+    uint64_t f;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f ? (double(ticks) * 1000.0 / double(f)) : 0.0;
+#else
+    return double(ticks) / 1e6;
+#endif
+}
+
+struct DrawSubStageProfile {
+    uint64_t prog = 0;
+    uint64_t tex = 0;
+    uint64_t pass = 0;
+    uint64_t sets = 0;
+    uint64_t inputs = 0;
+    uint64_t pipe = 0;
+    uint64_t bind_vk = 0;
+    uint64_t dispatch = 0;
+    uint64_t occl_skip = 0;
+    uint64_t uub = 0;
+    uint64_t pipe_fast_hits = 0;
+    uint64_t pipe_mru_hits = 0;
+    uint64_t pipe_full_hits = 0;
+} g_draw_prof;
+
 // DispatchCompute: the bound program's compute stage over (x, y, z) groups, outside render passes, then a barrier
 // so what it wrote is visible to what follows.
 void dispatch(VkCommandBuffer cb, const Cmd& c) {
     static const bool off = std::getenv("NX_NO_COMPUTE") != nullptr;  // debug: skip compute dispatches
     if (off) return;
+    const uint64_t t_disp0 = draw_fast_ticks();
     g_hud_target = false;  // no render target: render scale 1 in its support buffer
     g_low_3d_target = false;
     g_is_3d_scene_draw = false;
@@ -461,15 +498,18 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
     // Defer compute barrier until vertex/graphics consumption, read-after-write, or transfer.
     g_compute_barrier_pending = true;
     g_stats.dispatches++;
+    g_draw_prof.dispatch += draw_fast_ticks() - t_disp0;
 }
 
 void vertex_read_barrier(VkCommandBuffer cb, const ShaderInfo* vs) {
     if (!g_vertex_pending || !vs) return;
     bool reads = false;
-    for (size_t k = 0; k < g_textures.bindings.size() && !reads; k++)
-        if (g_textures.bindings[k].first == vs && k < g_textures.resolved.size() && g_textures.resolved[k].texture)
+    for (size_t k = 0; k < g_textures.bindings.size() && !reads; k++) {
+        if (g_textures.bindings[k].first != vs) break;
+        if (k < g_textures.resolved.size() && g_textures.resolved[k].texture)
             if (GpuImage* img = image_of(g_textures.resolved[k].texture))
                 reads = img->rendered && img->rendered_at > g_vertex_visible_at;
+    }
     if (!reads) return;
     draw_end_rendering(cb, 1);
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -747,27 +787,31 @@ void init_draw_env_once() {
     }
 }
 
-// Thread-local state cached for draw()
-static thread_local uint64_t s_cached_pv = UINT64_MAX, s_cached_pf = UINT64_MAX;
-static thread_local std::vector<const ShaderInfo*> s_combined_shaders;
-static thread_local const std::vector<const ShaderInfo*>* s_cached_shaders = nullptr;
-static thread_local const ShaderInfo* s_cached_vs = nullptr;
-static thread_local const ShaderInfo* s_cached_fs = nullptr;
-static thread_local const ProgramLayout* s_cached_layout = nullptr;
-static thread_local std::vector<const ShaderInfo*> s_swapped_shaders;
+// Replay state cached for draw() (under gpu_lock())
+static uint64_t s_cached_pv = UINT64_MAX, s_cached_pf = UINT64_MAX;
+static std::vector<const ShaderInfo*> s_combined_shaders;
+static const std::vector<const ShaderInfo*>* s_cached_shaders = nullptr;
+static const ShaderInfo* s_cached_vs = nullptr;
+static const ShaderInfo* s_cached_fs = nullptr;
+static const ProgramLayout* s_cached_layout = nullptr;
+static std::vector<const ShaderInfo*> s_swapped_shaders;
 
-static thread_local uint64_t s_cached_target_c0 = UINT64_MAX, s_cached_target_depth = UINT64_MAX;
-static thread_local uint32_t s_cached_target_color_count = UINT32_MAX;
-static thread_local bool s_cached_uw_wide = false;
-static thread_local bool s_cached_hud_target = false;
-static thread_local bool s_cached_shadow_target = false;
-static thread_local bool s_cached_low_3d_target = false;
-static thread_local VkFormat s_cached_color_formats[8] = {};
-static thread_local uint32_t s_cached_ufloat_colors = 0;
-static thread_local VkFormat s_cached_depth_format = VK_FORMAT_UNDEFINED;
-static thread_local Targets s_cached_format_targets{};
-static thread_local bool s_cached_formats_valid = false;
-static thread_local bool s_pass_fresh_bake = false;
+static uint64_t s_cached_target_c0 = UINT64_MAX, s_cached_target_depth = UINT64_MAX;
+static uint32_t s_cached_target_color_count = UINT32_MAX;
+static bool s_cached_uw_wide = false;
+static bool s_cached_hud_target = false;
+static bool s_cached_shadow_target = false;
+static bool s_cached_low_3d_target = false;
+static bool s_cached_c0_is_1280_bgra8 = false;
+static bool s_cached_c0_is_bgra8_rt = false;
+static bool s_cached_c0_is_rgba8_screen_ui = false;
+static VkFormat s_cached_color_formats[8] = {};
+static uint32_t s_cached_ufloat_colors = 0;
+static VkFormat s_cached_depth_format = VK_FORMAT_UNDEFINED;
+static uint64_t s_cached_formats_hash = 0;
+static Targets s_cached_format_targets{};
+static bool s_cached_formats_valid = false;
+static bool s_pass_fresh_bake = false;
 
 struct ProgPairCacheSlot {
     uint64_t pv = UINT64_MAX, pf = UINT64_MAX;
@@ -778,20 +822,23 @@ struct ProgPairCacheSlot {
     const ProgramLayout* layout = nullptr;
 };
 constexpr size_t kProgPairSlots = 512;
-static thread_local ProgPairCacheSlot s_prog_pair_cache[kProgPairSlots];
-static thread_local uint32_t s_pass_targets_ver = 0;
-static thread_local uint32_t s_format_targets_ver = 0;
+static ProgPairCacheSlot s_prog_pair_cache[kProgPairSlots];
+static uint32_t s_pass_targets_ver = 0;
+static uint32_t s_format_targets_ver = 0;
 struct MruEntry {
     PipelineKey key;
     VkPipelineLayout layout;
     VkPipeline pipeline;
 };
 static constexpr size_t kMruSize = 8;
-static thread_local MruEntry s_mru_cache[kMruSize]{};
-static thread_local uint8_t s_mru_order[kMruSize] = {0, 1, 2, 3, 4, 5, 6, 7};
-static thread_local size_t s_mru_count = 0;
+static MruEntry s_mru_cache[kMruSize]{};
+static uint8_t s_mru_order[kMruSize] = {0, 1, 2, 3, 4, 5, 6, 7};
+static size_t s_mru_count = 0;
 
 bool live_ui_draw(const Targets& t) {
+    if (t.color_count && t.colors[0] == s_cached_target_c0) {
+        return s_cached_c0_is_1280_bgra8 && t.depth && g_state.depth.depth_test;
+    }
     const Texture* t0 = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
     return t0 && t0->width >= 1280 && t0->format == 0x25 && t.depth && g_state.depth.depth_test;
 }
@@ -1007,14 +1054,19 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
 }
 
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
+    const uint64_t t_draw0 = draw_fast_ticks();
     g_stats.total++;
-    if (g_state.rasterizer_discard) return false;  // nothing reaches the targets
+    auto skip_draw = [&]() -> bool {
+        g_draw_prof.occl_skip += draw_fast_ticks() - t_draw0;
+        return false;
+    };
+    if (g_state.rasterizer_discard) return skip_draw();  // nothing reaches the targets
     // A draw hidden by CPU occlusion culling still marks its textures as sampled (gather_textures below): kept
     // textures nothing sampled for 2 s are released and their slots sample the dummy (black buildings when they
     // came back into view). Everything else about the draw is skipped.
     bool hidden_touch = false;
     if (!g_state.render_enable) {
-        if (!occlusion_cpu_culling()) return false;
+        if (!occlusion_cpu_culling()) return skip_draw();
         hidden_touch = true;
     }
     if (occlusion_object_skipped() && !g_state.depth.depth_write && !g_state.depth.stencil_test) {
@@ -1025,10 +1077,10 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 break;
             }
         }
-        if (!writes_color) return false;
+        if (!writes_color) return skip_draw();
     }
-    if (shadow_draw_skipped(t)) return false;
-    if (bloom_draw_skipped(t)) return false;
+    if (shadow_draw_skipped(t)) return skip_draw();
+    if (bloom_draw_skipped(t)) return skip_draw();
 
     const uint64_t cur_pv = g_state.stage_programs[0];
     const uint64_t cur_pf = g_state.stage_programs[1];
@@ -1048,7 +1100,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (t_replay_serial && pp.serial == t_replay_serial && pp.pv == cur_pv && pp.pf == cur_pf && !pp.shaders.empty() && pp.vs && pp.layout) {
             if (hidden_touch) {
                 touch_hidden_textures(pp.shaders);
-                return false;
+                return skip_draw();
             }
             shaders = &pp.shaders;
             vs = pp.vs;
@@ -1064,7 +1116,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             shaders = bound_graphics_shaders(s_combined_shaders);
             if (!shaders || shaders->empty()) {
                 g_stats.no_program++;
-                return false;
+                return skip_draw();
             }
             for (const ShaderInfo* s : *shaders) {
                 if (s->stage == ShaderStage::Vertex) vs = s;
@@ -1072,11 +1124,11 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             }
             if (!vs) {
                 g_stats.no_vertex++;
-                return false;
+                return skip_draw();
             }
             if (hidden_touch) {
                 touch_hidden_textures(*shaders);
-                return false;
+                return skip_draw();
             }
             layout_ptr = &program_layout(*shaders);
             pp.pv = cur_pv;
@@ -1097,7 +1149,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
     if (hidden_touch) {
         touch_hidden_textures(*shaders);
-        return false;
+        return skip_draw();
     }
     if (__builtin_expect(debug_shader_overrides_active(), 0)) {
         if (!debug_shader_overrides(shaders, fs, s_swapped_shaders)) return false;
@@ -1119,7 +1171,11 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
     }
     // Textures first: an upload or a layout change cannot happen inside the render pass.
+    const uint64_t t_prog_done = draw_fast_ticks();
+    g_draw_prof.prog += t_prog_done - t_draw0;
     uint32_t gathered = gather_textures(*shaders);
+    const uint64_t t_tex_done = draw_fast_ticks();
+    g_draw_prof.tex += t_tex_done - t_prog_done;
     if (__builtin_expect(s_dump_draw_textures_env != nullptr, 0)) {   // NX_DUMP_DRAW_TEXTURES=<fs hash>@<draw>: the images the first such draw samples, snapshotted (frames/00000_c00000NN)
         if (!s_dump_draw_textures_said && fs) {
             s_dump_draw_textures_said = true;
@@ -1211,12 +1267,21 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         s_cached_target_color_count = t.color_count;
         s_cached_formats_valid = false;
 
+        const Texture* c0_tx = cur_c0 ? get<Texture>(cur_c0) : nullptr;
+        s_cached_c0_is_1280_bgra8 = c0_tx && c0_tx->width >= 1280 && c0_tx->format == 0x25;
+        s_cached_c0_is_bgra8_rt = c0_tx && c0_tx->format == 0x25 && (c0_tx->flags & 8);
+        s_cached_c0_is_rgba8_screen_ui =
+            c0_tx && c0_tx->width >= 1280 &&
+            (c0_tx->format == 0x25 || c0_tx->format == 0x37 || c0_tx->format == 0x38 ||
+             c0_tx->format == 0x99 || c0_tx->format == 0x9a || c0_tx->format == 0x9b ||
+             c0_tx->format == 0x9c);
+
         s_cached_uw_wide = false;
         if (uw_on()) {
-            GpuImage* wi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : (t.depth ? image_of(t.depth) : nullptr);
+            GpuImage* wi = cur_c0 ? image_of(cur_c0) : (t.depth ? image_of(t.depth) : nullptr);
             s_cached_uw_wide = wi && wi->uw;
         }
-        GpuImage* hi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : (t.depth ? image_of(t.depth) : nullptr);
+        GpuImage* hi = cur_c0 ? image_of(cur_c0) : (t.depth ? image_of(t.depth) : nullptr);
         s_cached_hud_target = hi && hi->hud;
         s_cached_shadow_target = depth_only(t) && t.depth && image_of(t.depth) && image_of(t.depth)->shadow;
         s_cached_low_3d_target = hi && hi->low_3d;
@@ -1253,14 +1318,14 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
     }
 
-    const Texture* c0_tex = tt.color_count && tt.colors[0] ? get<Texture>(tt.colors[0]) : nullptr;
-    const bool is_rgba8_screen_ui = c0_tex && c0_tex->width >= 1280 &&
-                                    (c0_tex->format == 0x25 || c0_tex->format == 0x37 || c0_tex->format == 0x38 ||
-                                     c0_tex->format == 0x99 || c0_tex->format == 0x9a || c0_tex->format == 0x9b ||
-                                     c0_tex->format == 0x9c);
-    g_is_3d_scene_draw = g_state.depth.depth_test && g_state.depth.depth_write && !g_hud_target && !is_rgba8_screen_ui;
+    const bool is_rgba8_screen_ui = s_cached_c0_is_rgba8_screen_ui;
+    g_is_3d_scene_draw = (g_state.depth.depth_test || g_state.depth.depth_write) && !g_hud_target && !is_rgba8_screen_ui;
 
+    const uint64_t t_before_sets = draw_fast_ticks();
+    g_draw_prof.pass += t_before_sets - t_tex_done;
     build_sets(cb, *shaders, layout);
+    const uint64_t t_after_sets = draw_fast_ticks();
+    g_draw_prof.sets += t_after_sets - t_before_sets;
     // Vertex and index data before the pass begins: a range a dispatch of this submit wrote may need a GPU copy
     // (nvn_written.cpp), which cannot be recorded inside a pass.
     DrawInputs in;
@@ -1270,6 +1335,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         g_stats.no_indices++;
         return false;
     }
+    const uint64_t t_after_inputs = draw_fast_ticks();
+    g_draw_prof.inputs += t_after_inputs - t_after_sets;
     g_is_3d_scene_draw = false;
     check_vertex_ranges(vs, fs, indexed, c, in);  // NX_CHECK_VERTS (nvn_written.cpp)
     if (!g_rendering) {
@@ -1299,6 +1366,11 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         s_cached_ufloat_colors = uf;
         GpuImage* dimg = tt.depth ? image_of(tt.depth) : nullptr;
         s_cached_depth_format = dimg && dimg->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? dimg->format : VK_FORMAT_UNDEFINED;
+        uint64_t fh = (uint64_t(n_col) << 56) | (uint64_t(uf) << 48) | uint64_t(uint32_t(s_cached_depth_format));
+        for (uint32_t k = 0; k < n_col; k++) {
+            fh ^= uint64_t(uint32_t(s_cached_color_formats[k])) + 0x9E3779B97F4A7C15ull + (fh << 6) + (fh >> 2);
+        }
+        s_cached_formats_hash = fh;
         s_cached_format_targets = tt;
         s_cached_formats_valid = true;
         s_format_targets_ver = used_detached ? 0 : cur_t_ver;
@@ -1306,59 +1378,56 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         s_format_targets_ver = used_detached ? 0 : cur_t_ver;
     }
 
+    const uint64_t t_before_pipe = draw_fast_ticks();
+    g_draw_prof.pass += t_before_pipe - t_after_inputs;
     VkPipeline pipeline = VK_NULL_HANDLE;
     const DynamicStateCaps& dc = vk_dynamic_caps();
     const uint32_t eff_mode = dc.primitive_topology ? canonical_topology_mode(mode) : mode;
 
-    // 4-entry intra-pass MRU bypass: consecutive or alternating draws (e.g. character + outline, UI + text)
-    // sharing shaders, topology, state version, layout, and render pass reuse the VkPipeline directly without
-    // zeroing and populating a 704-byte PipelineKey.
+    // 64-slot (32 buckets x 2 ways = 3.5 KB L1-resident) fast pipeline table:
+    // Reuses VkPipeline across passes without constructing the 704-byte PipelineKey when target formats and state version match.
     struct PipeMru {
         const ShaderInfo* vs = nullptr;
         const ShaderInfo* fs = nullptr;
+        uint64_t formats_hash = 0;
         uint32_t mode = 0;
         uint32_t state_version = 0;
         VkPipelineLayout layout = VK_NULL_HANDLE;
-        VkFormat c0_format = VK_FORMAT_UNDEFINED;
-        VkFormat depth_format = VK_FORMAT_UNDEFINED;
-        uint32_t color_count = 0;
         bool indexed = false;
         bool textures_empty = false;
         bool ui_draw = false;
         VkPipeline pipeline = VK_NULL_HANDLE;
     };
-    static PipeMru s_pipe_mru[4];
-    static VkCommandBuffer s_pipe_mru_cb = VK_NULL_HANDLE;
-    if (targets_changed || s_pipe_mru_cb != cb) {
-        for (auto& e : s_pipe_mru) e.pipeline = VK_NULL_HANDLE;
-        s_pipe_mru_cb = cb;
-    }
+    static constexpr size_t kPipeFastBuckets = 32;
+    static PipeMru s_pipe_mru[kPipeFastBuckets][2]{};
 
     const bool tex_empty = g_textures.bindings.empty();
     const bool ui_draw = live_ui_draw(tt);
-    const VkFormat cur_c0_fmt = tt.color_count ? s_cached_color_formats[0] : VK_FORMAT_UNDEFINED;
-    if (!uw_on() && !live_flags()) {
-        for (int i = 0; i < 4; i++) {
-            const PipeMru& e = s_pipe_mru[i];
+    if (uw_on() && s_uw_cam_patch && !g_uw_wide && s_cached_c0_is_bgra8_rt) {
+        uw_ui_vertex_shader(vs);
+    }
+    const bool allow_fast_pipe = !g_uw_wide && !live_flags() && !__builtin_expect(s_uw_trace.active, 0);
+    const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^
+                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ eff_mode) &
+                              (kPipeFastBuckets - 1));
+    if (allow_fast_pipe) {
+        PipeMru* ways = s_pipe_mru[pf_bucket];
+        for (int w = 0; w < 2; w++) {
+            const PipeMru& e = ways[w];
             if (e.pipeline != VK_NULL_HANDLE &&
                 e.vs == vs &&
                 e.fs == fs &&
+                e.formats_hash == s_cached_formats_hash &&
                 e.mode == eff_mode &&
-                e.c0_format == cur_c0_fmt &&
-                e.depth_format == s_cached_depth_format &&
-                e.color_count == tt.color_count &&
                 (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
                 e.state_version == replay::g_pipeline_state_version &&
-                (dc.color_write_mask && dc.color_blend_equation
+                (dc.color_write_mask && dc.color_blend_equation && dc.depth_compare_op
                      ? true
                      : (e.textures_empty == tex_empty && e.ui_draw == ui_draw))) {
                 pipeline = e.pipeline;
-                if (i > 0) {
-                    PipeMru hit = e;
-                    for (int j = i; j > 0; j--) s_pipe_mru[j] = s_pipe_mru[j - 1];
-                    s_pipe_mru[0] = hit;
-                }
+                g_draw_prof.pipe_fast_hits++;
+                if (w == 1) std::swap(ways[0], ways[1]);
                 break;
             }
         }
@@ -1445,7 +1514,9 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         if (found != VK_NULL_HANDLE) {
             pipeline = found;
+            g_draw_prof.pipe_mru_hits++;
         } else {
+            g_draw_prof.pipe_full_hits++;
             auto is_async_safe_draw = [&]() -> bool {
                 if (g_frame.load(std::memory_order_relaxed) < 90) return false;
                 if (!fs || depth_only(tt)) return false;
@@ -1475,12 +1546,15 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 s_mru_order[0] = insert_idx;
             }
         }
-        if (pipeline != VK_NULL_HANDLE && !uw_on() && !live_flags()) {
-            for (int j = 3; j > 0; j--) s_pipe_mru[j] = s_pipe_mru[j - 1];
-            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, cur_c0_fmt,
-                             s_cached_depth_format, tt.color_count, indexed, tex_empty, ui_draw, pipeline};
+        if (pipeline != VK_NULL_HANDLE && allow_fast_pipe) {
+            PipeMru* ways = s_pipe_mru[pf_bucket];
+            ways[1] = ways[0];
+            ways[0] = {vs, fs, s_cached_formats_hash, eff_mode, replay::g_pipeline_state_version, layout.layout,
+                       indexed, tex_empty, ui_draw, pipeline};
         }
     }
+    const uint64_t t_after_pipe = draw_fast_ticks();
+    g_draw_prof.pipe += t_after_pipe - t_before_pipe;
     if (!pipeline) {
         sets_abort_draw();
         g_stats.no_pipeline++;
@@ -1621,6 +1695,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         g_dump_request = ++g_dump_draws;
     }
     trace_draw(t, mode, indexed, c, vs, fs, g_textures.bindings, g_textures.handles);
+    g_draw_prof.bind_vk += draw_fast_ticks() - t_after_pipe;
     return true;
 }
 
@@ -1793,6 +1868,26 @@ void draw_log_stats() {
         (unsigned long long)d_total, (unsigned long long)d_done,
         (unsigned long long)(d_total >= d_done ? d_total - d_done : 0),
         (unsigned long long)d_btex, (unsigned long long)d_lin);
+    {
+        const double inv_f = 1.0 / 600.0;
+        const double p_prog = draw_ticks_to_ms(g_draw_prof.prog) * inv_f;
+        const double p_tex = draw_ticks_to_ms(g_draw_prof.tex) * inv_f;
+        const double p_pass = draw_ticks_to_ms(g_draw_prof.pass) * inv_f;
+        const double p_sets = draw_ticks_to_ms(g_draw_prof.sets) * inv_f;
+        const double p_in = draw_ticks_to_ms(g_draw_prof.inputs) * inv_f;
+        const double p_pipe = draw_ticks_to_ms(g_draw_prof.pipe) * inv_f;
+        const double p_bvk = draw_ticks_to_ms(g_draw_prof.bind_vk) * inv_f;
+        const double p_disp = draw_ticks_to_ms(g_draw_prof.dispatch) * inv_f;
+        const double p_occl = draw_ticks_to_ms(g_draw_prof.occl_skip) * inv_f;
+        const double p_uub = draw_ticks_to_ms(g_draw_prof.uub) * inv_f;
+        const double p_sum = p_prog + p_tex + p_pass + p_sets + p_in + p_pipe + p_bvk;
+        log("nvn profile (ms/frame over 600): draw %.2f (prog %.2f, tex %.2f, pass %.2f, build_sets %.2f, inputs %.2f, pipe %.2f, bind+vk %.2f), dispatch %.2f, occl_skip %.2f, uub %.2f | pipe hits: fast %llu, mru8 %llu, full %llu",
+            p_sum, p_prog, p_tex, p_pass, p_sets, p_in, p_pipe, p_bvk, p_disp, p_occl, p_uub,
+            (unsigned long long)g_draw_prof.pipe_fast_hits,
+            (unsigned long long)g_draw_prof.pipe_mru_hits,
+            (unsigned long long)g_draw_prof.pipe_full_hits);
+        g_draw_prof = {};
+    }
 }
 
 void pass_end_only(VkCommandBuffer cb, int reason) {
@@ -1897,6 +1992,7 @@ bool draw_call(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed
     return draw(cb, t, mode, indexed, c);
 }
 void dispatch_call(VkCommandBuffer cb, const Cmd& c) { dispatch(cb, c); }
+void note_uub_ticks(uint64_t ticks) { g_draw_prof.uub += ticks; }
 
 uint64_t draw_take_dump_request() {
     uint64_t r = g_dump_request;

@@ -93,6 +93,7 @@ namespace nx::nvn {
 uint64_t submit_start_ns();  // host ns at the start of the submit being replayed
 bool draw_call(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c);
 void dispatch_call(VkCommandBuffer cb, const Cmd& c);
+void note_uub_ticks(uint64_t ticks);
 }  // namespace nx::nvn
 
 namespace nx::nvn::replay {

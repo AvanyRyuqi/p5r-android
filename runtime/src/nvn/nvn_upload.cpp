@@ -13,6 +13,24 @@
 
 namespace nx::nvn {
 
+uint64_t hash_memory(const uint8_t* p, uint64_t size);  // nvn_sampler.cpp
+
+uint64_t tex_sample_hash(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return 0;
+    if (size <= 192) {
+        uint64_t h = hash_memory(p, size) ^ (size * 0x9E3779B97F4A7C15ull);
+        for (uint64_t k = size & ~7ull; k < size; k++) h = (h ^ p[k]) * 0x100000001B3ull;
+        return h ? h : 1;
+    }
+    constexpr uint64_t kChunk = 64;
+    const uint64_t mid = (size / 2) & ~7ull;
+    const uint64_t tail = (size - kChunk) & ~7ull;
+    uint64_t h = hash_memory(p, kChunk) ^ (size * 0x9E3779B97F4A7C15ull);
+    h ^= hash_memory(p + mid, kChunk) * 0x9E3779B97F4A7C15ull;
+    h ^= hash_memory(p + tail, kChunk) * 0xC2B2AE3D27D4EB4Full;
+    return h ? h : 1;
+}
+
 using namespace nx::vk;
 
 namespace {
@@ -170,6 +188,11 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
     if (gpu_profile_on()) gpu_profile_mark(cb, "texture uploads");
     if (!t.memory || !t.storage_size) return;
     frame_guest_read(reinterpret_cast<const uint8_t*>(t.memory), t.storage_size);  // deferred write-backs first
+    if (!t.stride) {
+        img.upload_sample_hash = tex_sample_hash(reinterpret_cast<const uint8_t*>(t.memory), t.storage_size);
+        img.upload_storage_size = t.storage_size;
+        img.last_memory = t.memory;
+    }
     if (std::getenv("NX_TRACE_UPLOADS") && t.storage_size >= (1u << 20)) {
         const uint8_t* m = reinterpret_cast<const uint8_t*>(t.memory);
         size_t nz = 0;

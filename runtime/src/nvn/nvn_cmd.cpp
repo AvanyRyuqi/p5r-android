@@ -235,12 +235,23 @@ void note_drop(uint64_t h, const HandleEntry& e, uint64_t by, uint64_t by_start,
 }
 
 
+static thread_local uint64_t s_last_cb_guest = 0;
+static thread_local CommandBuffer* s_last_cb_ptr = nullptr;
+
 void CommandBufferInitialize(CPU& c) {  // NVNboolean (NVNcommandBuffer*, NVNdevice*)
-    make<CommandBuffer>(c.x[0]);
+    auto& cb = make<CommandBuffer>(c.x[0]);
+    s_last_cb_guest = c.x[0];
+    s_last_cb_ptr = &cb;
     c.x[0] = 1;
 }
 
-void CommandBufferFinalize(CPU& c) { destroy(c.x[0]); }
+void CommandBufferFinalize(CPU& c) {
+    if (s_last_cb_guest == c.x[0]) {
+        s_last_cb_guest = 0;
+        s_last_cb_ptr = nullptr;
+    }
+    destroy(c.x[0]);
+}
 
 void CommandBufferBeginRecording(CPU& c) {
     if (auto* cb = get<CommandBuffer>(c.x[0])) {
@@ -478,10 +489,15 @@ void CallCommands(CPU& c) {
 }  // namespace
 
 void record(uint64_t guest, Cmd cmd, const void* blob, size_t size) {
-    auto* cb = get<CommandBuffer>(guest);
-    if (!cb) {
-        g_no_cb++;
-        return;
+    CommandBuffer* cb = (guest && guest == s_last_cb_guest) ? s_last_cb_ptr : nullptr;
+    if (__builtin_expect(!cb, 0)) {
+        cb = get<CommandBuffer>(guest);
+        if (!cb) {
+            g_no_cb++;
+            return;
+        }
+        s_last_cb_guest = guest;
+        s_last_cb_ptr = cb;
     }
     std::lock_guard lk(cb->lock);
     cb->logical_cmds++;

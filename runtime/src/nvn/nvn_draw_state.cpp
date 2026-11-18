@@ -20,6 +20,16 @@ uint32_t g_targets_version = 1;
 uint32_t g_storage_state_version[kStages] = {1, 1, 1, 1, 1, 1};
 }
 
+static inline uint64_t state_fast_ticks() {
+#if defined(__aarch64__)
+    uint64_t v;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return plat::monotonic_ns();
+#endif
+}
+
 void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const Targets& targets) {
     State& s = g_state;
     auto blob = [&](size_t size) -> const uint8_t* {
@@ -212,23 +222,38 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
         case Cmd::BindDepthStencilState:
             if (auto* p = blob(sizeof(DepthStencilInfo))) {
                 if (std::memcmp(&s.depth, p, sizeof s.depth) != 0) {
+                    const auto* nd = reinterpret_cast<const DepthStencilInfo*>(p);
+                    const DynamicStateCaps& dc = vk_dynamic_caps();
+                    const bool need_pipe_bump =
+                        (!dc.depth_test_enable && s.depth.depth_test != nd->depth_test) ||
+                        (!dc.depth_write_enable && s.depth.depth_write != nd->depth_write) ||
+                        (!dc.depth_compare_op && (s.depth.depth_func != nd->depth_func || s.depth.depth_write != nd->depth_write)) ||
+                        (!dc.depth_bias_enable && (s.depth.depth_test != nd->depth_test || s.depth.depth_write != nd->depth_write || s.depth.depth_func != nd->depth_func)) ||
+                        (!dc.stencil_test_enable && s.depth.stencil_test != nd->stencil_test) ||
+                        (!dc.stencil_op && (std::memcmp(s.depth.stencil_func, nd->stencil_func, sizeof s.depth.stencil_func) != 0 ||
+                                            std::memcmp(s.depth.stencil_fail, nd->stencil_fail, sizeof s.depth.stencil_fail) != 0 ||
+                                            std::memcmp(s.depth.depth_fail, nd->depth_fail, sizeof s.depth.depth_fail) != 0 ||
+                                            std::memcmp(s.depth.depth_pass, nd->depth_pass, sizeof s.depth.depth_pass) != 0));
                     std::memcpy(&s.depth, p, sizeof s.depth);
                     g_dynamic_state_version++;
-                    const DynamicStateCaps& dc = vk_dynamic_caps();
-                    if (!(dc.depth_test_enable && dc.depth_write_enable && dc.depth_compare_op &&
-                          dc.stencil_test_enable && dc.stencil_op && dc.depth_bias_enable))
-                        g_pipeline_state_version++;
+                    if (need_pipe_bump) g_pipeline_state_version++;
                 }
             }
             break;
         case Cmd::BindPolygonState:
             if (auto* p = blob(sizeof(PolygonInfo))) {
                 if (std::memcmp(&s.polygon, p, sizeof s.polygon) != 0) {
+                    const auto* np = reinterpret_cast<const PolygonInfo*>(p);
+                    const DynamicStateCaps& dc = vk_dynamic_caps();
+                    const bool need_pipe_bump =
+                        (!dc.cull_mode && s.polygon.cull != np->cull) ||
+                        (!dc.front_face && s.polygon.front != np->front) ||
+                        (!dc.polygon_mode && s.polygon.mode != np->mode) ||
+                        (!dc.depth_bias_enable && (s.polygon.offset_enables != np->offset_enables || s.polygon.mode != np->mode)) ||
+                        (!dc.stencil_op && (s.polygon.cull == 0) != (np->cull == 0));
                     std::memcpy(&s.polygon, p, sizeof s.polygon);
                     g_dynamic_state_version++;
-                    const DynamicStateCaps& dc = vk_dynamic_caps();
-                    if (!(dc.cull_mode && dc.front_face && dc.polygon_mode && dc.depth_bias_enable && dc.stencil_op))
-                        g_pipeline_state_version++;
+                    if (need_pipe_bump) g_pipeline_state_version++;
                 }
             }
             break;
@@ -262,18 +287,33 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                     (unsigned long long)g_stats.done, (unsigned long long)c.a[0], (unsigned long long)c.a[1],
                     (unsigned long long)off, b_sz, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
             }
-            if (c.blob < list.blobs.size())
-                if (uint8_t* p = const_cast<uint8_t*>(guest_bytes(c.a[0] + off))) {
+            if (c.blob < list.blobs.size()) {
+                static uint64_t s_last_uub_gpu = 0;
+                static uint8_t* s_last_uub_base = nullptr;
+                static uint64_t s_last_uub_serial = 0;
+                uint8_t* base = nullptr;
+                if (c.a[0] && c.a[0] == s_last_uub_gpu && t_replay_serial == s_last_uub_serial && s_last_uub_base) {
+                    base = s_last_uub_base;
+                } else if (c.a[0]) {
+                    base = const_cast<uint8_t*>(guest_bytes(c.a[0]));
+                    s_last_uub_gpu = c.a[0];
+                    s_last_uub_base = base;
+                    s_last_uub_serial = t_replay_serial;
+                }
+                if (uint8_t* p = base ? (base + off) : const_cast<uint8_t*>(guest_bytes(c.a[0] + off))) {
                     const uint8_t* b_ptr = list.blob_ptr(c.blob);
                     const size_t b_sz = list.blob_size(c.blob);
                     if (b_ptr && b_sz) {
                         if (std::memcmp(p, b_ptr, b_sz) != 0) {
+                            const uint64_t t_uub0 = state_fast_ticks();
                             std::memcpy(p, b_ptr, b_sz);
                             dedup_invalidate(p, b_sz);
                             written_cpu_write(p, b_sz);
+                            note_uub_ticks(state_fast_ticks() - t_uub0);
                         }
                     }
                 }
+            }
             break;
         }
         case Cmd::ResetCounter: occlusion_reset(cb, c, targets); break;

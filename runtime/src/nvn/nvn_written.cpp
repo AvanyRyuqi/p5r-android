@@ -367,11 +367,15 @@ struct StreamCacheEntry {
 static StreamCacheEntry s_stream_cache[16];
 static uint32_t s_stream_valid_mask = 0;
 static uint64_t s_stream_valid_gen = 0;
+static const uint8_t* s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+static const uint8_t* s_stream_hi = nullptr;
 
 void stream_cache_invalidate(const uint8_t* p, uint64_t size) {
-    if (!p || !size || !s_stream_valid_mask) return;
+    if (!p || !size || !s_stream_valid_mask || p >= s_stream_hi || p + size <= s_stream_lo) return;
     if (s_stream_valid_gen != dedup_generation()) {
         s_stream_valid_mask = 0;
+        s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+        s_stream_hi = nullptr;
         return;
     }
     const uint8_t* p_end = p + size;
@@ -412,6 +416,8 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
     if (s_stream_valid_gen != cur_gen) {
         s_stream_valid_gen = cur_gen;
         s_stream_valid_mask = 0;
+        s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
+        s_stream_hi = nullptr;
     }
 
     for (uint32_t m = in.used; m; m &= m - 1) {
@@ -429,7 +435,11 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
         in.vertex[s] = read_upload(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, 16), 16);
         g_upload_kind = kUploadOther;
         s_stream_cache[s] = {r.address, p, r.size, cur_gen, in.vertex[s]};
-        if (p) s_stream_valid_mask |= (1u << s);
+        if (p) {
+            s_stream_valid_mask |= (1u << s);
+            if (p < s_stream_lo) s_stream_lo = p;
+            if (p + r.size > s_stream_hi) s_stream_hi = p + r.size;
+        }
     }
     if (!indexed) return true;
     uint32_t count = uint32_t(c.i[0]);
@@ -505,8 +515,9 @@ void written_cpu_write(const uint8_t* p, uint64_t size) {
     // UpdateUniformBuffer / ReportCounter into a range a dispatch of this submit writes: the copy misses the bytes
     // (they reach guest memory at replay time) and the write-back replaces them. Not handled: logged.
     static int logs = 0;
-    if (logs < 16 && !exp_no_write_backs() && written_overlaps(p, size) && logs++ < 16)
-        log("nvn: guest write into a compute-written range (%llu bytes): lost at write-back", (unsigned long long)size);
+    if (__builtin_expect(logs < 16 && !g_regions.empty(), 0))
+        if (!exp_no_write_backs() && written_overlaps(p, size) && logs++ < 16)
+            log("nvn: guest write into a compute-written range (%llu bytes): lost at write-back", (unsigned long long)size);
 }
 
 std::vector<WriteBack> written_take() {
