@@ -27,6 +27,8 @@ namespace {
 
 constexpr size_t kCtrlSize = 0x880, kCtrlFields = 0x6f8, kCtrlFieldsEnd = 0x758;  // read_control: +0, +0x6f8..+0x758
 
+std::atomic<uint64_t> g_program_generation{1};
+
 struct PendingStage {
     uint64_t code = 0;  // host address of the code block
     uint32_t magic = 0;
@@ -68,10 +70,12 @@ void ProgramInitialize(CPU& c) {  // NVNboolean (NVNprogram*, NVNdevice*)
         note_replaced(c.x[0]);
     }
     make<Program>(c.x[0]);
+    g_program_generation.fetch_add(1, std::memory_order_release);
     c.x[0] = 1;
 }
 
 void ProgramFinalize(CPU& c) {
+    g_program_generation.fetch_add(1, std::memory_order_release);
     {
         std::lock_guard lk(objects_lock());
         note_replaced(c.x[0]);
@@ -113,6 +117,7 @@ void set_shaders(CPU& c, size_t stride) {
             }
         }
     }
+    g_program_generation.fetch_add(1, std::memory_order_release);
     c.x[0] = 1;
 }
 
@@ -126,6 +131,10 @@ const std::vector<const ShaderInfo*>* program_shaders(uint64_t program) {
     if (!p) return nullptr;
     if (!p->resolved.load(std::memory_order_acquire)) resolve(*p, program);
     return &p->shaders;
+}
+
+uint64_t program_generation() {
+    return g_program_generation.load(std::memory_order_acquire);
 }
 
 NX_HLE("nvnProgramInitialize", ProgramInitialize);

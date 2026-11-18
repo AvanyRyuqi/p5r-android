@@ -400,10 +400,15 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
     if (found_entry) {
         Entry& e = *found_entry;
         const bool is_3d_geom = g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex);
+        const uint64_t addr_phase = (reinterpret_cast<uintptr_t>(p) >> 6) & 7ull;
+        const bool frame_verified =
+            (cur_frame == e.last_verified_frame) ||
+            (e.verified_streak >= 8 && cur_frame > e.last_verified_frame &&
+             (cur_frame - e.last_verified_frame) < 8 && ((cur_frame ^ addr_phase) & 7ull) != 0);
         if (!verify && e.size == size && e.padded == padded && e.block < g_blocks.size() &&
             g_blocks[e.block].buffer != VK_NULL_HANDLE &&
             (e.last_verified_submit == g_submits ||
-             (is_3d_geom && e.verified_streak >= 3 && cur_frame == e.last_verified_frame))) {
+             (is_3d_geom && e.verified_streak >= 3 && frame_verified))) {
             e.serial = std::max(e.serial, frame_recording_serial());
             e.seen = g_submits;
             g_stats_cache.hits++;
