@@ -157,6 +157,7 @@ namespace {
 struct CpuMasks {
     long num_cores = 0;
     cpu_set_t big{};
+    cpu_set_t main_non_replay{};
     cpu_set_t little{};
     bool valid = false;
 };
@@ -186,23 +187,40 @@ const CpuMasks& get_cpu_masks() {
             }
         }
         CPU_ZERO(&m.big);
+        CPU_ZERO(&m.main_non_replay);
         CPU_ZERO(&m.little);
         if (any_freq && max_f > min_f) {
             unsigned long threshold = min_f + (max_f - min_f) / 4;
+            int last_big = -1;
+            int big_count = 0;
             for (int i = 0; i < n; ++i) {
-                if (freqs[i] > threshold) CPU_SET(i, &m.big);
-                else CPU_SET(i, &m.little);
+                if (freqs[i] > threshold) {
+                    CPU_SET(i, &m.big);
+                    last_big = i;
+                    big_count++;
+                } else {
+                    CPU_SET(i, &m.little);
+                }
             }
             if (CPU_COUNT(&m.big) > 0 && CPU_COUNT(&m.little) > 0) {
+                for (int i = 0; i < n; ++i) {
+                    if (big_count >= 2 && i == last_big) continue;
+                    CPU_SET(i, &m.main_non_replay);
+                }
                 m.valid = true;
                 return m;
             }
         }
         // Fallback for 6+2 8-core SoCs if sysfs frequencies are unreadable
         CPU_ZERO(&m.big);
+        CPU_ZERO(&m.main_non_replay);
         CPU_ZERO(&m.little);
-        for (int i = 0; i < 6; ++i) CPU_SET(i, &m.little);
+        for (int i = 0; i < 6; ++i) {
+            CPU_SET(i, &m.little);
+            CPU_SET(i, &m.main_non_replay);
+        }
         CPU_SET(6, &m.big);
+        CPU_SET(6, &m.main_non_replay);
         CPU_SET(7, &m.big);
         m.valid = true;
         return m;
@@ -266,6 +284,23 @@ void set_thread_priority(int priority) {
     if (rc != 0) {
         __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to set thread priority %d: errno %d", priority, errno);
     }
+}
+
+void pin_thread_tid_to_little_cores(int64_t tid) {
+    if (tid <= 0) return;
+    const CpuMasks& m = get_cpu_masks();
+    if (!m.valid) return;
+    (void)sched_setaffinity(static_cast<pid_t>(tid), sizeof(cpu_set_t), &m.little);
+    (void)setpriority(PRIO_PROCESS, static_cast<id_t>(tid), 0);
+}
+
+void pin_thread_tid_to_big_cores(int64_t tid, int priority) {
+    if (tid <= 0) return;
+    const CpuMasks& m = get_cpu_masks();
+    if (!m.valid) return;
+    const cpu_set_t* target = (priority > -10 && CPU_COUNT(&m.main_non_replay) > 0) ? &m.main_non_replay : &m.big;
+    (void)sched_setaffinity(static_cast<pid_t>(tid), sizeof(cpu_set_t), target);
+    (void)setpriority(PRIO_PROCESS, static_cast<id_t>(tid), priority);
 }
 
 // ---- sampling profiler (simpleperf is not always allowed on retail phones) ------------------------------------
@@ -462,12 +497,14 @@ void window_size(uint32_t& w, uint32_t& h) {
     std::string nr = setting("NX_RES");
     std::string res = setting("RESOLUTION");
     std::string r = setting("resolution");
+    std::string hud1080 = setting("NX_HUD_1080");
+    const uint32_t ui_h = (hud1080 == "1") ? 1080u : 720u;
 
-    auto parse_target_h = [](const std::string& s) -> uint32_t {
-        if (s == "360p" || s == "360") return 360;
-        if (s == "480p" || s == "480") return 480;
-        if (s == "540p" || s == "540") return 720;
-        if (s == "720p" || s == "720") return 720;
+    auto parse_target_h = [ui_h](const std::string& s) -> uint32_t {
+        if (s == "360p" || s == "360") return ui_h;
+        if (s == "480p" || s == "480") return ui_h;
+        if (s == "540p" || s == "540") return ui_h;
+        if (s == "720p" || s == "720") return ui_h;
         if (s == "1080p" || s == "1080") return 1080;
         unsigned cw = 0, ch = 0;
         if (!s.empty() && std::sscanf(s.c_str(), "%ux%u", &cw, &ch) == 2 && ch) return ch;

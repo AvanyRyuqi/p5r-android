@@ -528,6 +528,7 @@ void cull_job_hook(CPU& c) {
                 const uint64_t node = ld<uint64_t>(mesh + 8);
                 const uint64_t local_bounds = mesh + 0x90;
                 if (!node || !local_bounds) continue;
+                g_cull_eval.fetch_add(1, std::memory_order_relaxed);
 
                 MeshBoundsSlot& slot = tl_bounds_cache[((mesh >> 5) ^ (mesh >> 17)) & 4095];
                 const uint32_t shift = (slot.mesh == mesh && slot.node == node && slot.static_streak >= 2) ? 9u : 5u;
@@ -579,8 +580,6 @@ void cull_job_hook(CPU& c) {
                 // Protect planar structural geometry (walls, floors, ceilings, road slabs) and massive shells
                 const float struct_limit = (near_dist < 18.0f) ? 8.0f : (near_dist < 30.0f ? 14.0f : 18.0f);
                 if (structural || radius >= struct_limit) continue;
-
-                g_cull_eval.fetch_add(1, std::memory_order_relaxed);
 
                 const float ratio = radius / view_dist;
                 bool cull = false;
