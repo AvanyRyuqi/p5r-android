@@ -164,6 +164,7 @@ bool make_shader_info(const uint8_t* code, const uint8_t* control, std::vector<u
         if (!parse_harness_resources(*resources, list)) return fail("unreadable resources record");
         if (!apply_harness(out.refl, list)) return fail("resources record does not match the SPIR-V");
     }
+    out.control_ready.store(true, std::memory_order_release);
     return true;
 }
 
@@ -246,7 +247,7 @@ void ensure_resources_loaded(Cache& k) {
 }
 
 void populate_control(ShaderInfo& info, const uint8_t* code, const ShaderControl& c) {
-    if (info.control.valid) return;
+    if (info.control_ready.load(std::memory_order_acquire) || info.control.valid) return;
     if (c.const_size && uint64_t(c.const_offset) + c.const_size <= c.code_size) {
         info.constants.assign(code + c.const_offset, code + c.const_offset + c.const_size);
     }
@@ -254,6 +255,8 @@ void populate_control(ShaderInfo& info, const uint8_t* code, const ShaderControl
         for (int i = 0; i < 3; i++) info.local_size[i] = std::max<uint32_t>(1, c.local_size[i]);
     }
     info.control = c;
+    info.control_ready.store(true, std::memory_order_release);
+    g_shader_epoch.fetch_add(1, std::memory_order_release);
 }
 
 }  // namespace

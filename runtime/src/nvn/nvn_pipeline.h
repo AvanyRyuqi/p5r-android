@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <shared_mutex>
 #include <vector>
 
 #include "nvn_shaders.h"
@@ -84,6 +85,7 @@ struct PipelineKey {
 };
 VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout, bool allow_async = true);
 bool pipeline_workers_busy();
+std::shared_mutex& pipeline_cache_mutex();
 
 // Shared NVN -> Vulkan translation helpers used consistently by static pipeline creation,
 // canonical key deduplication, and dynamic command-buffer state emission.
@@ -228,7 +230,7 @@ VkImageView attachment_view(GpuImage& img, uint32_t level, uint32_t layer, VkFor
 // a same-size colour format it can be viewed as.
 VkFormat view_format(const GpuImage& img, uint32_t nvn);
 // Destroys the cached views of an image about to be freed.
-void forget_image_views(const GpuImage& img);
+void forget_image_views(const GpuImage& img, bool keep_default_view);
 uint64_t view_forget_serial();
 // True when sampled_view() would need no transfer or layout change (it can then be called inside a render pass).
 bool sampled_ready(uint64_t texture);

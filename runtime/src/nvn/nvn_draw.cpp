@@ -28,11 +28,25 @@ Stats g_stats;
 bool g_hud_target = false;
 bool g_shadow_target = false;
 bool g_low_3d_target = false;
+bool g_is_3d_scene_draw = false;
 
 const uint8_t* guest_bytes(uint64_t gpu) {
+    if (!gpu) return nullptr;
+    struct DirectPoolSpan {
+        uint64_t start = 0, size = 0;
+        uint64_t host_base = 0;
+        const MemoryPool* pool = nullptr;
+    };
+    static thread_local DirectPoolSpan s_mru{};
+    if (s_mru.size && gpu - s_mru.start < s_mru.size && s_mru.pool && s_mru.pool->gpu == s_mru.start) {
+        return reinterpret_cast<const uint8_t*>(s_mru.host_base + (gpu - s_mru.start));
+    }
     uint64_t off = 0;
     MemoryPool* p = pool_at_gpu(gpu, &off);
     uint64_t host = p ? pool_host(*p, off) : 0;
+    if (p && p->memory && host) {
+        s_mru = {p->gpu, p->size, p->memory, p};
+    }
     return host ? reinterpret_cast<const uint8_t*>(host) : nullptr;
 }
 
@@ -69,6 +83,7 @@ Targets g_pass;           // what the open pass renders to
 GpuImage* g_pass_images[9];  // their images (8: depth), resolved once per pass for gather_textures
 uint32_t g_pass_written = 0;  // targets the open pass's draws wrote: bit c colour c, bit 8 depth
 uint64_t g_pass_draws = 0;    // draws in the open pass (NX_EXP_RP split)
+static thread_local bool s_pass_linear_noted = false;
 uint64_t g_pass_ends[8];  // passes ended, by draw_end_rendering reason
 uint64_t g_submit_ns = 0;  // when the submit being replayed started
 VkExtent2D g_pass_extent{};
@@ -109,6 +124,15 @@ struct Bound {
     VkBool32 blend_enable[8]{};
     VkColorBlendEquationEXT blend_eq[8]{};
     VkColorComponentFlags write_mask[8]{};
+    uint32_t dynamic_version = 0;
+    uint32_t last_mode = UINT32_MAX;
+    bool last_indexed = false;
+    bool last_tex_empty = false;
+    bool last_ui_draw = false;
+    VkFormat last_depth_format = VK_FORMAT_MAX_ENUM;
+    uint32_t last_color_count = UINT32_MAX;
+    uint32_t last_ufloat_colors = UINT32_MAX;
+    VkExtent2D last_pass_extent{};
 } g_bound;
 uint64_t g_state_set = 0, g_state_kept = 0;  // state commands recorded and left out, for the log
 VkPipeline g_last_compute_pipeline = VK_NULL_HANDLE;
@@ -347,6 +371,7 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
     g_pass_cb = cb;
     g_pass_written = cleared | fresh;  // as a clear inside the pass: sampling it needs it stored first
     g_pass_draws = 0;
+    s_pass_linear_noted = false;
     trace_pass("begin: cleared, fresh", t, cleared, fresh);
     g_pass = t;
     g_pass_extent = extent;
@@ -386,6 +411,7 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
     if (off) return;
     g_hud_target = false;  // no render target: render scale 1 in its support buffer
     g_low_3d_target = false;
+    g_is_3d_scene_draw = false;
     const auto* shaders = program_shaders(g_state.stage_programs[5]);
     const ShaderInfo* cs = nullptr;
     if (shaders)
@@ -428,6 +454,7 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
     }
     bind_sets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout);
     if (gpu_profile_on()) gpu_profile_mark(cb, "compute " + cs->hash);
+    flush_compute_barrier(cb);
     if (!gpu_args || !written_indirect(cb, args)) p_vkCmdDispatch(cb, x, y, z);
     if (gpu_profile_on()) gpu_profile_mark(cb, "outside passes (clears, uploads, copies)");
 
@@ -612,6 +639,7 @@ void restart_stats(uint32_t mode, const Cmd& c) {
 // completed, with the other write-backs. NX_LINEAR_WRITE_BACK=0: not (as before).
 std::vector<uint64_t> g_linear_targets;  // this submit's (NVNtexture*), drawn into
 std::vector<WriteBack> g_late_write_backs;  // their copies: applied when the submit retires, never waited for
+uint64_t g_linear_copies = 0;
 
 bool linear_write_back_on() {
     static const bool s_linear_write_back_on = !(std::getenv("NX_LINEAR_WRITE_BACK") && std::getenv("NX_LINEAR_WRITE_BACK")[0] == '0');
@@ -741,7 +769,18 @@ static thread_local Targets s_cached_format_targets{};
 static thread_local bool s_cached_formats_valid = false;
 static thread_local bool s_pass_fresh_bake = false;
 
-// MRU Pipeline Cache
+struct ProgPairCacheSlot {
+    uint64_t pv = UINT64_MAX, pf = UINT64_MAX;
+    uint64_t serial = 0;
+    std::vector<const ShaderInfo*> shaders;
+    const ShaderInfo* vs = nullptr;
+    const ShaderInfo* fs = nullptr;
+    const ProgramLayout* layout = nullptr;
+};
+constexpr size_t kProgPairSlots = 512;
+static thread_local ProgPairCacheSlot s_prog_pair_cache[kProgPairSlots];
+static thread_local uint32_t s_pass_targets_ver = 0;
+static thread_local uint32_t s_format_targets_ver = 0;
 struct MruEntry {
     PipelineKey key;
     VkPipelineLayout layout;
@@ -791,8 +830,28 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     Bound& b = g_bound;
     const State& s = g_state;
     const DynamicStateCaps& dc = vk_dynamic_caps();
+    const uint32_t cnt = std::min<uint32_t>(t.color_count, 8);
+    const bool ui_draw = live_ui_draw(t);
     bool all = !b.has_dynamic;
+    if (!all && !live_flags() && !s_keep_hud_alpha && !s_exp3d &&
+        b.dynamic_version == replay::g_dynamic_state_version &&
+        b.last_mode == mode && b.last_indexed == indexed && b.last_tex_empty == tex_empty &&
+        b.last_ui_draw == ui_draw &&
+        b.last_depth_format == s_cached_depth_format && b.last_color_count == cnt &&
+        b.last_ufloat_colors == s_cached_ufloat_colors &&
+        same_bytes(b.viewport, vp) && same_bytes(b.scissor, sc)) {
+        return;
+    }
     b.has_dynamic = true;
+    b.dynamic_version = replay::g_dynamic_state_version;
+    b.last_mode = mode;
+    b.last_indexed = indexed;
+    b.last_tex_empty = tex_empty;
+    b.last_ui_draw = ui_draw;
+    b.last_depth_format = s_cached_depth_format;
+    b.last_color_count = cnt;
+    b.last_ufloat_colors = s_cached_ufloat_colors;
+    b.last_pass_extent = g_pass_extent;
     auto differs = [&](bool d) { return (all || d) ? (g_state_set++, true) : (g_state_kept++, false); };
 
     if (differs(!same_bytes(b.viewport, vp))) p_vkCmdSetViewport(cb, 0, 1, &vp), b.viewport = vp;
@@ -809,7 +868,6 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     DepthStencilInfo eff_depth = ds;
     BlendTarget eff_blend[8];
     ChannelMaskInfo eff_mask;
-    const uint32_t cnt = std::min<uint32_t>(t.color_count, 8);
     const bool need_blend_override = (cnt > 0 && (dc.color_blend_equation || dc.color_write_mask));
     if (need_blend_override) {
         effective_draw_state_overrides(t, tex_empty, eff_blend, eff_mask, eff_depth);
@@ -985,33 +1043,60 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         fs = s_cached_fs;
         layout_ptr = s_cached_layout;
     } else {
-        shaders = bound_graphics_shaders(s_combined_shaders);
-        if (!shaders || shaders->empty()) {
-            g_stats.no_program++;
-            return false;
+        const size_t pp_idx = (((cur_pv >> 4) ^ (cur_pv >> 13)) ^ ((cur_pf >> 3) ^ (cur_pf >> 11) * 0x9E3779B97F4A7C15ull)) & (kProgPairSlots - 1);
+        ProgPairCacheSlot& pp = s_prog_pair_cache[pp_idx];
+        if (t_replay_serial && pp.serial == t_replay_serial && pp.pv == cur_pv && pp.pf == cur_pf && !pp.shaders.empty() && pp.vs && pp.layout) {
+            if (hidden_touch) {
+                touch_hidden_textures(pp.shaders);
+                return false;
+            }
+            shaders = &pp.shaders;
+            vs = pp.vs;
+            fs = pp.fs;
+            layout_ptr = pp.layout;
+            s_cached_pv = cur_pv;
+            s_cached_pf = cur_pf;
+            s_cached_shaders = shaders;
+            s_cached_vs = vs;
+            s_cached_fs = fs;
+            s_cached_layout = layout_ptr;
+        } else {
+            shaders = bound_graphics_shaders(s_combined_shaders);
+            if (!shaders || shaders->empty()) {
+                g_stats.no_program++;
+                return false;
+            }
+            for (const ShaderInfo* s : *shaders) {
+                if (s->stage == ShaderStage::Vertex) vs = s;
+                if (s->stage == ShaderStage::Fragment) fs = s;
+            }
+            if (!vs) {
+                g_stats.no_vertex++;
+                return false;
+            }
+            if (hidden_touch) {
+                touch_hidden_textures(*shaders);
+                return false;
+            }
+            layout_ptr = &program_layout(*shaders);
+            pp.pv = cur_pv;
+            pp.pf = cur_pf;
+            pp.serial = t_replay_serial;
+            pp.shaders = *shaders;
+            pp.vs = vs;
+            pp.fs = fs;
+            pp.layout = layout_ptr;
+            shaders = &pp.shaders;
+            s_cached_pv = cur_pv;
+            s_cached_pf = cur_pf;
+            s_cached_shaders = shaders;
+            s_cached_vs = vs;
+            s_cached_fs = fs;
+            s_cached_layout = layout_ptr;
         }
-        for (const ShaderInfo* s : *shaders) {
-            if (s->stage == ShaderStage::Vertex) vs = s;
-            if (s->stage == ShaderStage::Fragment) fs = s;
-        }
-        if (!vs) {
-            g_stats.no_vertex++;
-            return false;
-        }
-        if (hidden_touch) {
-            gather_textures(*shaders);
-            return false;
-        }
-        layout_ptr = &program_layout(*shaders);
-        s_cached_pv = cur_pv;
-        s_cached_pf = cur_pf;
-        s_cached_shaders = shaders;
-        s_cached_vs = vs;
-        s_cached_fs = fs;
-        s_cached_layout = layout_ptr;
     }
     if (hidden_touch) {
-        gather_textures(*shaders);
+        touch_hidden_textures(*shaders);
         return false;
     }
     if (__builtin_expect(debug_shader_overrides_active(), 0)) {
@@ -1140,26 +1225,52 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     g_hud_target = s_cached_hud_target;
     g_shadow_target = s_cached_shadow_target;
     g_low_3d_target = s_cached_low_3d_target;
-    bool need_break = gathered & kNeedBreak;
-    if (gathered & kSampledPending) clears_flush_reason(11), clears_flush(cb);  // cleared (and stored) before it is sampled
-    bool targets_changed = !g_rendering || (s_targets_memcmp ? std::memcmp(&g_pass, &tt, sizeof tt) != 0 : !targets_same(g_pass, tt));
+    const bool used_detached = (tp != &t);
+    const uint32_t cur_t_ver = replay::g_targets_version;
+    bool need_break = (gathered & (kNeedBreak | kSampledPending)) != 0;
+    bool targets_changed = !g_rendering ||
+                           ((used_detached || cur_t_ver != s_pass_targets_ver) &&
+                            (s_targets_memcmp ? std::memcmp(&g_pass, &tt, sizeof tt) != 0 : !targets_same(g_pass, tt)));
+    if (used_detached) {
+        s_pass_targets_ver = 0;
+    } else if (!targets_changed) {
+        s_pass_targets_ver = cur_t_ver;
+    }
     if (g_rendering && (need_break || targets_changed)) {
         (targets_changed ? g_stats.breaks_targets : g_stats.breaks_textures)++;
         // NX_CLEARS_V2: pending clears wait for the pass that takes them, or for one on their images (begin_rendering).
-        if (clears_keep_pending() && !need_break)
+        if (clears_keep_pending())
             pass_end_only(cb, 1);
         else
             draw_end_rendering(cb, 1);
     }
+    if (gathered & kSampledPending) {
+        if (clears_keep_pending()) {
+            for (const ResolvedTexture& r : g_textures.resolved)
+                if (r.texture) clears_flush_reason(11), clears_flush_image(cb, r.texture);
+        } else {
+            clears_flush_reason(11), clears_flush(cb);
+        }
+    }
+
+    const Texture* c0_tex = tt.color_count && tt.colors[0] ? get<Texture>(tt.colors[0]) : nullptr;
+    const bool is_rgba8_screen_ui = c0_tex && c0_tex->width >= 1280 &&
+                                    (c0_tex->format == 0x25 || c0_tex->format == 0x37 || c0_tex->format == 0x38 ||
+                                     c0_tex->format == 0x99 || c0_tex->format == 0x9a || c0_tex->format == 0x9b ||
+                                     c0_tex->format == 0x9c);
+    g_is_3d_scene_draw = g_state.depth.depth_test && g_state.depth.depth_write && !g_hud_target && !is_rgba8_screen_ui;
 
     build_sets(cb, *shaders, layout);
     // Vertex and index data before the pass begins: a range a dispatch of this submit wrote may need a GPU copy
     // (nvn_written.cpp), which cannot be recorded inside a pass.
     DrawInputs in;
     if (!draw_inputs_shared(cb, vs, indexed, c, in)) {
+        g_is_3d_scene_draw = false;
+        sets_abort_draw();
         g_stats.no_indices++;
         return false;
     }
+    g_is_3d_scene_draw = false;
     check_vertex_ranges(vs, fs, indexed, c, in);  // NX_CHECK_VERTS (nvn_written.cpp)
     if (!g_rendering) {
         GpuImage* c0_pre = tt.color_count && tt.colors[0] ? image_of(tt.colors[0]) : nullptr;
@@ -1172,9 +1283,12 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             gpu_profile_mark(cb, label);
         }
         begin_rendering(cb, tt);
+        s_pass_targets_ver = used_detached ? 0 : cur_t_ver;
     }
 
-    if (!s_cached_formats_valid || std::memcmp(&s_cached_format_targets, &tt, sizeof tt) != 0) {
+    if (!s_cached_formats_valid ||
+        ((used_detached || cur_t_ver != s_format_targets_ver) &&
+         std::memcmp(&s_cached_format_targets, &tt, sizeof tt) != 0)) {
         uint32_t uf = 0;
         const uint32_t n_col = std::min<uint32_t>(tt.color_count, 8);
         for (uint32_t k = 0; k < n_col; k++) {
@@ -1187,6 +1301,9 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         s_cached_depth_format = dimg && dimg->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? dimg->format : VK_FORMAT_UNDEFINED;
         s_cached_format_targets = tt;
         s_cached_formats_valid = true;
+        s_format_targets_ver = used_detached ? 0 : cur_t_ver;
+    } else {
+        s_format_targets_ver = used_detached ? 0 : cur_t_ver;
     }
 
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -1202,8 +1319,12 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         uint32_t mode = 0;
         uint32_t state_version = 0;
         VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkFormat c0_format = VK_FORMAT_UNDEFINED;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+        uint32_t color_count = 0;
         bool indexed = false;
         bool textures_empty = false;
+        bool ui_draw = false;
         VkPipeline pipeline = VK_NULL_HANDLE;
     };
     static PipeMru s_pipe_mru[4];
@@ -1214,6 +1335,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
 
     const bool tex_empty = g_textures.bindings.empty();
+    const bool ui_draw = live_ui_draw(tt);
+    const VkFormat cur_c0_fmt = tt.color_count ? s_cached_color_formats[0] : VK_FORMAT_UNDEFINED;
     if (!uw_on() && !live_flags()) {
         for (int i = 0; i < 4; i++) {
             const PipeMru& e = s_pipe_mru[i];
@@ -1221,10 +1344,15 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.vs == vs &&
                 e.fs == fs &&
                 e.mode == eff_mode &&
+                e.c0_format == cur_c0_fmt &&
+                e.depth_format == s_cached_depth_format &&
+                e.color_count == tt.color_count &&
                 (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
                 e.state_version == replay::g_pipeline_state_version &&
-                (dc.color_write_mask || e.textures_empty == tex_empty)) {
+                (dc.color_write_mask && dc.color_blend_equation
+                     ? true
+                     : (e.textures_empty == tex_empty && e.ui_draw == ui_draw))) {
                 pipeline = e.pipeline;
                 if (i > 0) {
                     PipeMru hit = e;
@@ -1246,7 +1374,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         key.stream_count = uint32_t(std::min<size_t>(g_state.streams.size(), 16));
         std::copy_n(g_state.streams.begin(), key.stream_count, key.streams);
         key.color = g_state.color, key.polygon = g_state.polygon;
-        effective_draw_state_overrides(t, tex_empty, key.blend, key.mask, key.depth);
+        effective_draw_state_overrides(tt, tex_empty, key.blend, key.mask, key.depth);
         key.restart = effective_primitive_restart(mode, indexed) ? 1 : 0;
         if (indexed && g_state.restart) restart_stats(mode, c);
         frame_draws(vs, indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]));
@@ -1349,10 +1477,12 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         if (pipeline != VK_NULL_HANDLE && !uw_on() && !live_flags()) {
             for (int j = 3; j > 0; j--) s_pipe_mru[j] = s_pipe_mru[j - 1];
-            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, indexed, tex_empty, pipeline};
+            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, cur_c0_fmt,
+                             s_cached_depth_format, tt.color_count, indexed, tex_empty, ui_draw, pipeline};
         }
     }
     if (!pipeline) {
+        sets_abort_draw();
         g_stats.no_pipeline++;
         return false;
     }
@@ -1414,12 +1544,14 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             sc.extent.height = std::max<uint32_t>(1u, std::min<uint32_t>(sc.extent.height / 2, g_pass_extent.height));
         }
     }
-    if (g_low_3d_target) {  // NX_LOW_3D: 0.75x resolution 3D render target (720x405)
-        if (g_state.has_viewport) vp.x *= 0.75f, vp.y *= 0.75f, vp.width *= 0.75f, vp.height *= 0.75f;
+    if (g_low_3d_target) {  // NX_LOW_3D: scaled 3D render target (720x405 at 480p, 640x360 at 360p)
+        const float k = low_3d_scale();
+        if (g_state.has_viewport) vp.x *= k, vp.y *= k, vp.width *= k, vp.height *= k;
         if (g_state.has_scissor) {
-            sc.offset.x = (sc.offset.x * 3) / 4, sc.offset.y = (sc.offset.y * 3) / 4;
-            sc.extent.width = std::max<uint32_t>(1u, std::min<uint32_t>((sc.extent.width * 3) / 4, g_pass_extent.width));
-            sc.extent.height = std::max<uint32_t>(1u, std::min<uint32_t>((sc.extent.height * 3) / 4, g_pass_extent.height));
+            const int32_t x0 = low_3d_down(sc.offset.x), y0 = low_3d_down(sc.offset.y);
+            const int64_t x1 = std::min<int64_t>(low_3d_down_end(int32_t(sc.offset.x + int64_t(sc.extent.width))), g_pass_extent.width);
+            const int64_t y1 = std::min<int64_t>(low_3d_down_end(int32_t(sc.offset.y + int64_t(sc.extent.height))), g_pass_extent.height);
+            sc = {{x0, y0}, {uint32_t(std::max<int64_t>(1, x1 - x0)), uint32_t(std::max<int64_t>(1, y1 - y0))}};
         }
     }
     // NX_EXP_3D (an experiment, the picture breaks): on the 3D draws (depth test, a 960-wide pass) "scissor" keeps
@@ -1465,7 +1597,10 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     if (gpu_profile_on())
         gpu_profile_count(0, uint64_t(uint32_t(indexed ? c.i[0] : c.i[1])) * uint64_t(std::max(1, c.i[3])));
     g_pass_written |= ((1u << t.color_count) - 1) | (g_state.depth.depth_write || g_state.depth.stencil_test ? 1u << 8 : 0);
-    for (uint32_t k = 0; k < t.color_count && k < 8; k++) note_linear_target(t.colors[k]);
+    if (!s_pass_linear_noted) {
+        s_pass_linear_noted = true;
+        for (uint32_t k = 0; k < t.color_count && k < 8; k++) note_linear_target(t.colors[k]);
+    }
     // NX_SNAP_FS=<hash>,<hash>[@<first draw>]: also snapshot after draws with those fragment shaders (8 at most, or
     // NX_SNAP_FS_MAX).
     bool snap_by_fs = s_snap_fs.active && g_stats.done >= s_snap_fs.from && s_snap_fs_count < s_snap_fs.max &&
@@ -1497,7 +1632,7 @@ void linear_write_back_pause(bool paused) { g_linear_paused.store(paused, std::m
 
 void linear_targets_write_back(VkCommandBuffer cb) {  // before the submit ends, outside any pass
     if (g_linear_targets.empty()) return;
-    static uint64_t copies = 0, bytes = 0, next_log = 0;
+    static uint64_t bytes = 0, next_log = 0;
     struct Copy {
         GpuImage* img;
         const Texture* tx;
@@ -1558,7 +1693,7 @@ void linear_targets_write_back(VkCommandBuffer cb) {  // before the submit ends,
         r.imageExtent = {c.tx->width, c.tx->height, 1};
         p_vkCmdCopyImageToBuffer(cb, c.img->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, up.buffer, 1, &r);
         g_late_write_backs.push_back({up.ptr, reinterpret_cast<uint8_t*>(c.tx->memory), size, nullptr});
-        copies++, bytes += size;
+        g_linear_copies++, bytes += size;
     }
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};  // the copies, for the host once the fence signals
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1567,7 +1702,7 @@ void linear_targets_write_back(VkCommandBuffer cb) {  // before the submit ends,
                            0, 1, &mb, 0, nullptr, uint32_t(todo.size()), back);
     if (g_frame >= next_log) {
         next_log = g_frame + 600;
-        log("nvn: linear render targets written back: %llu copies, %.2f MB so far", (unsigned long long)copies,
+        log("nvn: linear render targets written back: %llu copies, %.2f MB so far", (unsigned long long)g_linear_copies,
             double(bytes) / 1e6);
     }
 }
@@ -1600,8 +1735,12 @@ std::vector<WriteBack> draw_take_write_backs() {  // an asynchronous submit copi
 void draw_begin_submit() {
     init_draw_env_once();
     g_bound_serial = 0;
+    s_cached_pv = UINT64_MAX, s_cached_pf = UINT64_MAX;
+    s_cached_shaders = nullptr, s_cached_vs = nullptr, s_cached_fs = nullptr, s_cached_layout = nullptr;
     g_rendering = false;
     g_pass_cb = VK_NULL_HANDLE;
+    s_pass_targets_ver = 0;
+    s_format_targets_ver = 0;
     g_linear_targets.clear(), g_late_write_backs.clear();
     g_vertex_pending = false, g_vertex_visible_at = g_pass_serial;  // each command buffer begins with a full barrier
     g_bound = Bound{};  // a new command buffer
@@ -1644,6 +1783,16 @@ void draw_log_stats() {
         (unsigned long long)t.no_vertex, (unsigned long long)t.no_pipeline, (unsigned long long)t.no_indices);
     log("nvn passes: %llu ended by a draw's texture uploads or layout changes, %llu by new targets, %llu dispatches",
         (unsigned long long)t.breaks_textures, (unsigned long long)t.breaks_targets, (unsigned long long)t.dispatches);
+    static uint64_t s_prev_total = 0, s_prev_done = 0, s_prev_breaks_tex = 0, s_prev_linear = 0;
+    const uint64_t d_total = t.total - s_prev_total;
+    const uint64_t d_done = t.done - s_prev_done;
+    const uint64_t d_btex = t.breaks_textures - s_prev_breaks_tex;
+    const uint64_t d_lin = g_linear_copies - s_prev_linear;
+    s_prev_total = t.total, s_prev_done = t.done, s_prev_breaks_tex = t.breaks_textures, s_prev_linear = g_linear_copies;
+    log("nvn window: +%llu draws (%llu done, %llu occluded), +%llu tex-breaks, +%llu linear write-backs",
+        (unsigned long long)d_total, (unsigned long long)d_done,
+        (unsigned long long)(d_total >= d_done ? d_total - d_done : 0),
+        (unsigned long long)d_btex, (unsigned long long)d_lin);
 }
 
 void pass_end_only(VkCommandBuffer cb, int reason) {
@@ -1657,7 +1806,10 @@ void pass_end_only(VkCommandBuffer cb, int reason) {
         p_vkCmdEndRendering(cb);
     g_rendering = false;
     s_pass_fresh_bake = false;
-    g_bound = Bound{};  // each render pass instance requires pipelines and dynamic state to be bound
+    s_pass_targets_ver = 0;
+    g_bound = Bound{};
+    g_bound.cb = cb;
+    sets_invalidate_bound();
     // What the pass wrote is read by what follows (sampled, copied, loaded by the next pass), and what it sampled may
     // be rendered over next. The images stay GENERAL, so transition() records no barrier. Metal (MoltenVK) and the
     // Intel driver ordered passes anyway; NVIDIA overlaps them, and later passes read half-written tiles: the course
@@ -1705,7 +1857,10 @@ void pass_end_for_transfer(VkCommandBuffer cb) {
 }
 bool pass_open_on(const Targets& t) { return g_rendering && targets_same(g_pass, t); }
 VkExtent2D pass_extent() { return g_pass_extent; }
-void pass_begin(VkCommandBuffer cb, const Targets& t) { begin_rendering(cb, t); }
+void pass_begin(VkCommandBuffer cb, const Targets& t) {
+    s_pass_targets_ver = 0;
+    begin_rendering(cb, t);
+}
 // After a clear inside the pass (nvn_clears.cpp). A masked one is a fullscreen draw with its own pipeline, viewport
 // and scissor (nvn_mask_clear.cpp): the next draw sets everything again.
 void pass_mark_written(uint32_t bits) { g_pass_written |= bits, g_bound = Bound{}, sets_invalidate_bound(); }

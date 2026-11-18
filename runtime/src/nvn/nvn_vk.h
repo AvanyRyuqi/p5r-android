@@ -25,6 +25,7 @@ struct GpuImage {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool rendered = false;  // written by the GPU: never re-uploaded from guest memory
     bool uploaded = false;  // filled from the texture's pool memory
+    bool retired = false;   // owner texture finalized or re-initialized: never shared with new textures via g_live_images
     // Given texels by nvnTextureWriteTexels: those never reach guest memory here, so it is not uploaded from there
     // again (a pool flush over it wiped the light probes' direction map, docs/nvn/DEBUG.md #49).
     bool texels = false;
@@ -43,9 +44,17 @@ struct GpuImage {
     bool low_3d = false;      // NX_LOW_3D: 0.75x downscaled 3D render target (720x405)
 };
 
-// NX_LOW_3D (nvn_image.cpp): 3D scene render targets (960x540) are created at 720x405 (0.75x)
-// to dramatically cut GPU fillrate on low-end Mali, while HUD/menus stay at 720p.
+// NX_LOW_3D (nvn_image.cpp): 3D scene render targets (960x540) are created at 720x405 (0.75x, 480p) or 640x360 (0.667x, 360p)
+// to dramatically cut GPU fillrate on low-end GPUs, while HUD/menus and swapchain stay at crisp 720p/1080p.
 bool low_3d_on();
+int32_t low_3d_num();
+int32_t low_3d_den();
+inline int32_t low_3d_down(int32_t v) { return int32_t((int64_t(v) * low_3d_num()) / low_3d_den()); }
+inline int32_t low_3d_down_end(int32_t v) {
+    const int32_t den = low_3d_den();
+    return int32_t((int64_t(v) * low_3d_num() + (den - 1)) / den);
+}
+inline float low_3d_scale() { return float(low_3d_num()) / float(low_3d_den()); }
 bool low_3d_texture(const Texture& t);
 
 // NX_HUD_1080 (nvn_image.cpp): render targets of the handheld screen's size, 1280x720, are made at 3/2 of it,
@@ -268,6 +277,7 @@ void frame_log(uint64_t frames);  // the mode's counters, with the timing log
 void free_retired_images(uint64_t completed);
 // A GPU-written image of a destroyed texture with the same memory and shape (nvn_frames.cpp), or null.
 std::shared_ptr<GpuImage> reuse_image(const Texture& t);  // images of textures destroyed before submit `completed` + 1
+std::shared_ptr<GpuImage> take_free_image(const GpuImage& proto);
 
 // nvn_debug.cpp: NX_DUMP_FRAMES, the presented texture read back (recorded into the present's command buffer, written
 // after its fence).
@@ -357,7 +367,7 @@ void submit_lists_reset();  // at each submit's start (draw_begin_submit)
 void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list);  // nvn_copy.cpp: texture copies
 void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list);    // buffer -> texture
 void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list);  // nvnCommandBufferClearTexture
-void forget_image_views(const GpuImage& img);
+void forget_image_views(const GpuImage& img, bool keep_default_view);
 // nvn_debug.cpp: NX_SNAP_DRAWS mid-frame snapshots of colour target 0.
 bool debug_snap_wanted(uint64_t draw);
 // nvn_occlusion.cpp: P5R's occlusion queries (ResetCounter / ReportCounter of samples passed) and the draws they

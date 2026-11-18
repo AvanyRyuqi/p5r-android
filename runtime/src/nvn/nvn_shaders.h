@@ -10,6 +10,7 @@
 // tests/shader_cache_test.cpp can run the same code over all 12,717 shaders (build with -DNX_SHADERS_STANDALONE).
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -205,12 +206,26 @@ void support_buffer_set_viewport(SupportBuffer& sb, float width, float height, b
 
 // ---- one stage ---------------------------------------------------------------------------------------------------
 
+struct ShaderAtomicBool {
+    std::atomic<bool> v{false};
+    ShaderAtomicBool() = default;
+    ShaderAtomicBool(bool b) : v(b) {}
+    ShaderAtomicBool(const ShaderAtomicBool& o) : v(o.v.load(std::memory_order_acquire)) {}
+    ShaderAtomicBool& operator=(const ShaderAtomicBool& o) {
+        v.store(o.v.load(std::memory_order_acquire), std::memory_order_release);
+        return *this;
+    }
+    bool load(std::memory_order m = std::memory_order_seq_cst) const { return v.load(m); }
+    void store(bool b, std::memory_order m = std::memory_order_seq_cst) { v.store(b, m); }
+};
+
 struct ShaderInfo {
     std::string hash;
     ShaderStage stage = ShaderStage::Unknown;  // from the SPIR-V execution model
     std::vector<uint32_t> spirv;
     ShaderReflection refl;
     ShaderControl control;
+    ShaderAtomicBool control_ready{false};
     // c[1]: the constant data at code block + control.const_offset. Copied because the game may reuse the pool; it
     // can also be bound in place (code GPU address + const_offset, 0x100-aligned). The SPIR-V declares every c[k] as
     // vec4[4096]; bind at least const_size rounded up to 16.

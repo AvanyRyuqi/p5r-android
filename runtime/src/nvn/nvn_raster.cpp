@@ -93,11 +93,20 @@ bool raster_command(const Cmd& c) {
                                                        : s.stencil_compare_mask;
             // Apply to both faces when front-only or back-only is set, because negative-height viewport flips face
             // orientation relative to NVN when front_face is not explicitly re-specified.
-            if (c.mask & 3) v[0] = v[1] = uint8_t(c.n);
+            if (c.mask & 3) {
+                uint8_t nv = uint8_t(c.n);
+                if (v[0] != nv || v[1] != nv) {
+                    v[0] = v[1] = nv;
+                    replay::g_dynamic_state_version++;
+                }
+            }
             return true;
         }
         case Cmd::SetPolygonOffsetClamp:
-            s.bias_factor = c.f[0], s.bias_units = c.f[1], s.bias_clamp = c.f[2];
+            if (s.bias_factor != c.f[0] || s.bias_units != c.f[1] || s.bias_clamp != c.f[2]) {
+                s.bias_factor = c.f[0], s.bias_units = c.f[1], s.bias_clamp = c.f[2];
+                replay::g_dynamic_state_version++;
+            }
             return true;
         case Cmd::SetDepthBounds: {
             // Recorded only: MoltenVK has no depthBounds feature (Metal has no depth bounds test), and Wonder keeps
@@ -111,6 +120,7 @@ bool raster_command(const Cmd& c) {
         case Cmd::SetDepthClamp:
             if (s.depth_clamp != (c.n != 0)) {
                 s.depth_clamp = c.n != 0;
+                replay::g_dynamic_state_version++;
                 if (!vk_dynamic_caps().depth_clamp_enable) replay::g_pipeline_state_version++;
             }
             return true;

@@ -828,7 +828,7 @@ std::vector<uint32_t> patched_spirv(const ShaderInfo* s, const uint8_t* kinds, u
     if (fc && s->stage != ShaderStage::Compute && preserve_inf_nan(code, next)) code.swap(next);
     static const bool mali_opt = [] {
         const char* e = std::getenv("NX_MALI_SPIRV_OPT");
-        return !(e && e[0] == '0');
+        return e && e[0] == '1';
     }();
     if (mali_opt && optimize_spirv_mali(code, next)) code.swap(next);
     static const bool early_tests_on = [] {

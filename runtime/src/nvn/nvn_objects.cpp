@@ -374,6 +374,9 @@ void TextureInitialize(CPU& c) {  // NVNboolean (NVNtexture*, const NVNtextureBu
     if (!old) {
         std::lock_guard lk(objects_lock());
         note_replaced(guest);
+        if (auto o = objects().find(guest); o != objects().end())
+            if (auto* prev = dynamic_cast<Texture*>(o->second.get()); prev && prev->image && !prev->image->rendered)
+                prev->image->retired = true;
         keep_for_slots(guest);
         hand_image_to_snapshots(guest);
         pool_textures()[t.pool].insert(guest);
@@ -442,6 +445,8 @@ void expire_kept() {
         if (t && (sampled ? std::max(since, sampled) + 2'000'000'000ull : since + 250'000'000ull) > now) break;
         g_kept_order.pop_front();
         if (!t) continue;
+        note_replaced(key);
+        if (t->image && !t->image->rendered) t->image->retired = true;
         g_registered.erase(key);
         for (auto& [pool, set] : pool_textures()) set.erase(key);
         defer_object(std::move(o->second));
@@ -458,6 +463,9 @@ void TextureFinalize(CPU& c) {
     {
         std::lock_guard lk(objects_lock());
         note_replaced(guest);  // a replay in flight keeps resolving it (#55)
+        if (auto o = objects().find(guest); o != objects().end())
+            if (auto* prev = dynamic_cast<Texture*>(o->second.get()); prev && prev->image && !prev->image->rendered)
+                prev->image->retired = true;
         hand_image_to_snapshots(guest);
         uint64_t kept = keep_for_slots(guest);
         for (auto& [pool, set] : pool_textures()) set.erase(guest);
@@ -550,7 +558,13 @@ void release_kept(uint64_t key) {
         }
     g_registered.erase(key);
     for (auto& [pool, set] : pool_textures()) set.erase(key);
-    if (auto o = objects().find(key); o != objects().end()) defer_object(std::move(o->second)), objects().erase(o);
+    note_replaced(key);
+    if (auto o = objects().find(key); o != objects().end()) {
+        if (auto* prev = dynamic_cast<Texture*>(o->second.get()); prev && prev->image && !prev->image->rendered)
+            prev->image->retired = true;
+        defer_object(std::move(o->second));
+        objects().erase(o);
+    }
     g_released_kept++;
 }
 

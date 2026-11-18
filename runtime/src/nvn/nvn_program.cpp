@@ -63,11 +63,26 @@ void resolve(Program& p, uint64_t program) {
 }
 
 void ProgramInitialize(CPU& c) {  // NVNboolean (NVNprogram*, NVNdevice*)
+    {
+        std::lock_guard lk(objects_lock());
+        note_replaced(c.x[0]);
+    }
     make<Program>(c.x[0]);
     c.x[0] = 1;
 }
 
-void ProgramFinalize(CPU& c) { destroy(c.x[0]); }
+void ProgramFinalize(CPU& c) {
+    {
+        std::lock_guard lk(objects_lock());
+        note_replaced(c.x[0]);
+        if (auto o = objects().find(c.x[0]); o != objects().end()) {
+            defer_object(std::move(o->second));
+            objects().erase(o);
+            return;
+        }
+    }
+    destroy(c.x[0]);
+}
 
 void set_shaders(CPU& c, size_t stride) {
     std::vector<PendingStage> pending;
@@ -87,11 +102,16 @@ void set_shaders(CPU& c, size_t stride) {
         std::memcpy(st.fields.data(), reinterpret_cast<const void*>(control + kCtrlFields), st.fields.size());
         pending.push_back(st);
     }
-    if (auto* p = get<Program>(c.x[0])) {
-        std::lock_guard lk(p->lock);
-        p->pending = std::move(pending);
-        p->shaders.clear();
-        p->resolved.store(false, std::memory_order_release);
+    {
+        std::lock_guard olk(objects_lock());
+        note_replaced(c.x[0]);
+        if (auto o = objects().find(c.x[0]); o != objects().end()) {
+            if (auto* p = dynamic_cast<Program*>(o->second.get())) {
+                std::lock_guard lk(p->lock);
+                p->pending = std::move(pending);
+                p->resolved.store(false, std::memory_order_release);
+            }
+        }
     }
     c.x[0] = 1;
 }

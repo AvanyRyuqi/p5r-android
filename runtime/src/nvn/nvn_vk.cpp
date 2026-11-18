@@ -388,7 +388,8 @@ bool init() {
             g_dyn_caps.depth_compare_op = g_dyn_caps.set_depth_compare_op != nullptr;
             g_dyn_caps.stencil_test_enable = g_dyn_caps.set_stencil_test_enable != nullptr;
             g_dyn_caps.stencil_op = g_dyn_caps.set_stencil_op != nullptr;
-            g_dyn_caps.vertex_stride = g_dyn_caps.bind_vertex_buffers2 != nullptr;
+            const char* dyn_vs = std::getenv("NX_DYNAMIC_VERTEX_STRIDE");
+            g_dyn_caps.vertex_stride = (dyn_vs && dyn_vs[0] == '1') && g_dyn_caps.bind_vertex_buffers2 != nullptr;
         }
         if (v13 || use_eds2_ext) {
             g_dyn_caps.set_depth_bias_enable = reinterpret_cast<PFN_vkCmdSetDepthBiasEnable>(
@@ -1011,7 +1012,7 @@ void gpu_present(uint64_t texture, const int32_t* crop, uint64_t origin_ns) {
         pi.pNext = &times;
     }
     r = p_vkQueuePresentKHR(g_queue, &pi);
-    if (g_past_timing && origin_ns && r >= 0) {  // the pictures that reached the screen since the last present
+    if (g_past_timing && origin_ns && r >= 0 && (when.presentID & 7) == 0) {  // the pictures that reached the screen since the last present
         VkPastPresentationTimingGOOGLE past[16];
         uint32_t n = 16;
         if (g_past_timing(g_device, g_swapchain, &n, past) >= 0)

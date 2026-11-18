@@ -746,9 +746,12 @@ const char* vulkan_surface_extension() { return VK_KHR_ANDROID_SURFACE_EXTENSION
 
 int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* gipa) {
     ANativeWindow* win = static_cast<ANativeWindow*>(native_window);
+    const char* fsr_env = std::getenv("NX_FSR");
+    const std::string fsr_cfg = setting("NX_FSR");
+    const bool fsr_enabled = (fsr_env && fsr_env[0] == '1') || fsr_cfg == "1";
     uint32_t rw = 0, rh = 0;
     window_size(rw, rh);
-    if (win && rw && rh) {
+    if (win && rw && rh && !fsr_enabled) {
         int32_t cur_w = ANativeWindow_getWidth(win), cur_h = ANativeWindow_getHeight(win);
         bool portrait = cur_w < cur_h;
         int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
@@ -861,7 +864,8 @@ void on_cmd(android_app* app, int32_t cmd) {
             g_window_gen++;
             g_visible = true;
             const char* fsr = std::getenv("NX_FSR");
-            if (!(fsr && fsr[0] == '1')) {
+            const std::string fsr_cfg = setting("NX_FSR");
+            if (!((fsr && fsr[0] == '1') || fsr_cfg == "1")) {
                 uint32_t rw = 0, rh = 0;
                 window_size(rw, rh);
                 if (rw && rh && app->window) {

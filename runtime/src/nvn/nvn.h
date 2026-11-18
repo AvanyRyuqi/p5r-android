@@ -75,6 +75,7 @@ bool resolve_cache_on();  // NX_RESOLVE_CACHE (nvn_incarnation.cpp)
 bool texture_race_old();
 Object* find_object(uint64_t guest, uint64_t mark);  // under objects_lock (shared)
 void note_replaced(uint64_t guest);                  // under objects_lock (alone): guest's object is about to change
+bool has_incarnations();                             // any retired texture/pool/sampler records pending purge
 void purge_incarnations(uint64_t upto);              // under objects_lock (alone), from drain_objects: records <= upto
 uint64_t current_epoch();                            // the epoch of the last recorded change
 uint64_t replay_floor();                             // the last replay's mark: objects retired up to it can go
@@ -102,8 +103,8 @@ T* get(uint64_t guest) {
             uint64_t guest = 0, serial = 0;
             T* object = nullptr;
         };
-        thread_local Slot table[1024];
-        Slot& s = table[((guest >> 4) ^ (guest >> 14)) & 1023];
+        thread_local Slot table[4096];
+        Slot& s = table[((guest >> 4) ^ (guest >> 14)) & 4095];
         if (s.serial == serial && s.guest == guest) return s.object;
         T* p;
         {

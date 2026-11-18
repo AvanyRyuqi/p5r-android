@@ -323,11 +323,7 @@ const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages
     }
     static const uint32_t max_dynamic_ssbo = [] {
         const char* e = std::getenv("NX_DYNAMIC_SSBO");
-#if defined(__ANDROID__)
-        if (e && e[0] == '0') return 0u;
-#else
         if (!e || e[0] != '1') return 0u;
-#endif
         VkPhysicalDeviceProperties p{};
         p_vkGetPhysicalDeviceProperties(vk_physical(), &p);
         log("nvn/vk: storage buffers bound with dynamic offsets (up to %u per layout)",
@@ -352,10 +348,16 @@ const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages
                 log("nvn/vk: layout set %d binding %u: type %d count %u stages %#x", k, b.binding, int(b.descriptorType),
                     b.descriptorCount, unsigned(b.stageFlags));
     }
-    VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    ci.setLayoutCount = 4;
-    ci.pSetLayouts = pl.sets;
-    p_vkCreatePipelineLayout(vk_device(), &ci, nullptr, &pl.layout);
+    static std::map<std::array<VkDescriptorSetLayout, 4>, VkPipelineLayout> layout_cache;
+    std::array<VkDescriptorSetLayout, 4> set_key = {pl.sets[0], pl.sets[1], pl.sets[2], pl.sets[3]};
+    auto& cached_pl = layout_cache[set_key];
+    if (!cached_pl) {
+        VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        ci.setLayoutCount = 4;
+        ci.pSetLayouts = pl.sets;
+        p_vkCreatePipelineLayout(vk_device(), &ci, nullptr, &cached_pl);
+    }
+    pl.layout = cached_pl;
     return cache[stages] = pl;
 }
 
@@ -403,7 +405,13 @@ thread_local bool t_worker = false;
 VkPipeline compile(PipeBuild& b) {
     VkPipeline p = VK_NULL_HANDLE;
     const uint64_t t0 = plat::monotonic_ns();
-    VkResult made = p_vkCreateGraphicsPipelines(vk_device(), b.cache, 1, &b.ci, nullptr, &p);
+    VkResult made;
+    if (b.cache != VK_NULL_HANDLE) {
+        std::shared_lock<std::shared_mutex> cache_lk(pipeline_cache_mutex());
+        made = p_vkCreateGraphicsPipelines(vk_device(), b.cache, 1, &b.ci, nullptr, &p);
+    } else {
+        made = p_vkCreateGraphicsPipelines(vk_device(), VK_NULL_HANDLE, 1, &b.ci, nullptr, &p);
+    }
     note_pipeline_created(plat::monotonic_ns() - t0, t_worker);
     if (made != VK_SUCCESS) {
         log("nvn/vk: pipeline for %s + %s failed", b.vs_hash.c_str(), b.fs_hash.c_str());
@@ -465,7 +473,7 @@ Pool& pool() {
                 t_worker = true;
                 plat::set_thread_name("pipe-worker");
                 plat::reset_current_thread_affinity("pipe-worker");
-                plat::set_thread_priority(6);
+                plat::set_thread_priority(0);
                 for (;;) {
                     std::shared_ptr<PipeTask> t;
                     {
@@ -485,11 +493,14 @@ Pool& pool() {
     return *p;
 }
 
-void enqueue(const std::shared_ptr<PipeTask>& t) {
+void enqueue(const std::shared_ptr<PipeTask>& t, bool urgent = false) {
     Pool& pl = pool();
     {
         std::lock_guard lk(pl.m);
-        pl.q.push_back(t);
+        if (urgent)
+            pl.q.push_front(t);
+        else
+            pl.q.push_back(t);
     }
     pl.cv.notify_one();
 }
@@ -622,7 +633,10 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
     if (auto it = g_inflight.find(ck); it != g_inflight.end()) {
         std::shared_ptr<PipeTask> t = it->second;
         if (t->state.load() != 2) {
-            if (use_async) return *pending = true, VK_NULL_HANDLE;
+            if (use_async) {
+                enqueue(t, true);
+                return *pending = true, VK_NULL_HANDLE;
+            }
             const uint64_t t0 = plat::monotonic_ns();
             t->wait();
             note_pipeline_waited(plat::monotonic_ns() - t0);
@@ -637,7 +651,7 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
         auto t = std::make_shared<PipeTask>();
         t->build = std::move(build);
         g_inflight.emplace(ck, t);
-        enqueue(t);
+        enqueue(t, true);
         return *pending = true, VK_NULL_HANDLE;
     }
     VkPipeline p = compile(*build);
@@ -748,8 +762,8 @@ void pipeline_warm_step() {
     }
     const bool fast_scan = scan_budget > 0;
     const size_t limit = fast_scan ? std::min<size_t>(scan_budget, 256) : std::min<size_t>(recs.size(), 64);
-    const size_t max_inflight = fast_scan ? 64 : 32;
-    const uint64_t kBudgetNs = fast_scan ? 2'500'000 : 1'000'000;
+    const size_t max_inflight = fast_scan ? 16 : 8;
+    const uint64_t kBudgetNs = fast_scan ? 1'500'000 : 750'000;
     const uint64_t t0 = plat::monotonic_ns();
     for (size_t scanned = 0; scanned < limit && g_prewarm_inflight < max_inflight && remaining > 0; scanned++) {
         if ((!done[cursor] || (scanned & 63) == 63) && plat::monotonic_ns() - t0 > kBudgetNs) break;
@@ -1348,7 +1362,15 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgramLayout& layout) {
         sg.requiredSubgroupSize = 32;
         if (gpu_require_subgroup32()) ci.stage.pNext = &sg;
         ci.layout = layout.layout;
-        if (p_vkCreateComputePipelines(vk_device(), pipeline_cache(), 1, &ci, nullptr, &p) != VK_SUCCESS) {
+        VkPipelineCache pcache = pipeline_cache();
+        VkResult res;
+        if (pcache != VK_NULL_HANDLE) {
+            std::shared_lock<std::shared_mutex> cache_lk(pipeline_cache_mutex());
+            res = p_vkCreateComputePipelines(vk_device(), pcache, 1, &ci, nullptr, &p);
+        } else {
+            res = p_vkCreateComputePipelines(vk_device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p);
+        }
+        if (res != VK_SUCCESS) {
             log("nvn/vk: compute pipeline for %s failed", cs->hash.c_str());
             p = VK_NULL_HANDLE;
         }
@@ -1406,22 +1428,24 @@ VkImageView storage_view(VkCommandBuffer cb, uint64_t texture, const ImageShape&
 static uint64_t g_view_forget_serial = 1;
 uint64_t view_forget_serial() { return g_view_forget_serial; }
 
-void forget_image_views(const GpuImage& img) {
-    g_view_forget_serial++;
+void forget_image_views(const GpuImage& img, bool keep_default_view) {
+    bool dropped_any = true;
     // The caches are ordered by image first: its views are one run from the smallest key with that image (this was
     // a scan of every cached view per destroyed texture, a visible share of the replay time).
     auto drop = [&](auto& cache, auto lowest) {
         for (auto it = cache.lower_bound(lowest); it != cache.end() && std::get<0>(it->first) == img.image;) {
+            dropped_any = true;
             forget_framebuffers(it->second);
             if (it->second && it->second != img.view) p_vkDestroyImageView(vk_device(), it->second, nullptr);
             it = cache.erase(it);
         }
     };
-    forget_framebuffers(img.view);  // nvn_renderpass.cpp (attachments may use the whole-image view)
+    if (!keep_default_view) forget_framebuffers(img.view);  // nvn_renderpass.cpp (attachments may use the whole-image view)
     drop(g_sampled_views, std::make_tuple(img.image, VkImageViewType(0), 0u, uint64_t(0), uint64_t(0)));
     for (ViewHit& h : g_view_hits)
-        if (std::get<0>(h.key) == img.image) h = {};
+        if (std::get<0>(h.key) == img.image) h = {}, dropped_any = true;
     drop(g_attachment_views, std::make_tuple(img.image, 0u, 0u, VkFormat(0)));
+    if (dropped_any) g_view_forget_serial++;
 }
 
 }  // namespace nx::nvn

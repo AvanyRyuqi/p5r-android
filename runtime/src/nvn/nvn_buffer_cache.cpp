@@ -295,6 +295,25 @@ bool alloc(uint32_t c, Slot& out) {
 
 }  // namespace
 
+void cache_evict_address(const uint8_t* p) {
+    if (!on() || !p) return;
+    if (auto it = g_entries.find(p); it != g_entries.end()) {
+        clear_entry_front(p);
+        retire(it->second);
+        g_stats_cache.evicted++;
+        PageChurn& pc = g_page_churn[page_churn_index(p)];
+        if (pc.cached_count > 0) {
+            if (--pc.cached_count == 0) pc.cached_bloom = 0;
+        }
+        g_entries.erase(it);
+    }
+    const uint32_t s_base = seen_slot_index(p);
+    for (uint32_t step = 0; step < kSeenProbe; step++) {
+        SeenSlot& cand = g_seen_slots[(s_base + step) & (kSeenSlots - 1)];
+        if (cand.p == p) cand = {};
+    }
+}
+
 void cache_begin_submit() {
     if (!on()) return;
     const uint64_t done = async_gpu() ? frame_completed() : UINT64_MAX;  // synchronous: every submit was waited for
@@ -312,6 +331,10 @@ void cache_begin_submit() {
 
 bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align, Upload& out) {
     if (!on() || !p || !size || padded > kMaxCopy || align > kAlign) return false;
+    // Never cache guest pages written by GPU compute shaders (skinning/morph outputs): when NX_EXP_NO_WB=1 skips
+    // write-back to guest RAM and written_reset() clears g_regions at present, guest RAM at `p` appears unchanged
+    // and would otherwise be promoted to a static BufferCache entry after kStableSeen submits.
+    if (may_overlap_ever_written_pages(p, size)) return false;
     // Small uniform/storage blocks are sub-allocated from volatile per-frame guest rings (intra-submit repeats are
     // already answered in O(1) by dedup_upload / g_front); bypass <= 4 KB blocks unless NX_CACHE_BLOCKS=1, while
     // allowing larger (> 4 KB) static blocks to cache unless their 64 KB guest page exhibits ring-buffer churn.

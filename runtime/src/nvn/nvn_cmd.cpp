@@ -100,8 +100,8 @@ struct CommandBuffer : Object {
     uint32_t last_attrib_n = ~0u, last_stream_n = ~0u;
     VertexAttrib last_attribs[32]{};
     VertexStream last_streams[32]{};
-    uint64_t last_program = ~0ull;
-    uint32_t last_program_mask = ~0u;
+    uint64_t last_stage_program[6] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull};
+    uint32_t has_stage_program_mask = 0;
     bool has_viewport = false, has_scissor = false, has_restart = false;
     int32_t last_viewport[4] = {};
     int32_t last_scissor[4] = {};
@@ -128,8 +128,8 @@ struct CommandBuffer : Object {
         std::memset(has_blend, 0, sizeof has_blend);
         last_attrib_n = ~0u;
         last_stream_n = ~0u;
-        last_program = ~0ull;
-        last_program_mask = ~0u;
+        for (int s = 0; s < 6; s++) last_stage_program[s] = ~0ull;
+        has_stage_program_mask = 0;
         has_viewport = has_scissor = has_restart = false;
         last_tex_pool = last_smp_pool = ~0ull;
         std::memset(has_ubo_mask, 0, sizeof has_ubo_mask);
@@ -561,9 +561,21 @@ void record(uint64_t guest, Cmd cmd, const void* blob, size_t size) {
         if (cb->last_stencil_value_mask == key) return;
         cb->last_stencil_value_mask = key;
     } else if (cmd.op == Cmd::BindProgram) {
-        if (cb->last_program == cmd.a[0] && cb->last_program_mask == cmd.mask) return;
-        cb->last_program = cmd.a[0];
-        cb->last_program_mask = cmd.mask;
+        const uint32_t mask = cmd.mask & 0x3Fu;
+        if (mask && (cb->has_stage_program_mask & mask) == mask) {
+            bool all_same = true;
+            for (int s = 0; s < 6; s++) {
+                if ((mask >> s & 1) && cb->last_stage_program[s] != cmd.a[0]) {
+                    all_same = false;
+                    break;
+                }
+            }
+            if (all_same) return;
+        }
+        for (int s = 0; s < 6; s++) {
+            if (mask >> s & 1) cb->last_stage_program[s] = cmd.a[0];
+        }
+        cb->has_stage_program_mask |= mask;
     } else if (cmd.op == Cmd::BindMultisampleState) {
         if (cb->has_multisample && cb->last_multisample == cmd.n) return;
         cb->has_multisample = true;

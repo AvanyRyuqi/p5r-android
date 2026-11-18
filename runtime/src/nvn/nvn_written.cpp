@@ -55,6 +55,7 @@ Regions g_regions;
 const uint8_t* g_regions_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
 const uint8_t* g_regions_hi = nullptr;
 uint64_t g_regions_page_bits[64] = {};
+uint64_t g_ever_written_page_bits[64] = {};
 
 inline void mark_written_pages(const uint8_t* p, uint64_t size) {
     if (!p || !size) return;
@@ -62,11 +63,13 @@ inline void mark_written_pages(const uint8_t* p, uint64_t size) {
     const uintptr_t end_page = (reinterpret_cast<uintptr_t>(p) + size - 1) >> 16;
     if (end_page - start_page >= 4096) {
         std::memset(g_regions_page_bits, 0xFF, sizeof g_regions_page_bits);
+        std::memset(g_ever_written_page_bits, 0xFF, sizeof g_ever_written_page_bits);
         return;
     }
     for (uintptr_t pg = start_page; pg <= end_page; pg++) {
         const uint32_t bit = uint32_t((pg ^ (pg >> 12)) & 4095);
         g_regions_page_bits[bit >> 6] |= 1ull << (bit & 63);
+        g_ever_written_page_bits[bit >> 6] |= 1ull << (bit & 63);
     }
 }
 
@@ -265,11 +268,29 @@ Upload written_bind(VkCommandBuffer cb, const uint8_t* p, uint64_t size, uint64_
         g_merged++;
     }
     dedup_invalidate(lo, n);  // copies of these bytes made earlier in the submit are not what later work reads
+    cache_evict_address(lo);
+    if (p != lo) cache_evict_address(p);
     g_regions_lo = std::min(g_regions_lo, lo);
     g_regions_hi = std::max(g_regions_hi, lo + n);
     mark_written_pages(lo, n);
     It it = g_regions.emplace(lo, r).first;
     return at(it, off);
+}
+
+bool may_overlap_ever_written_pages(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return false;
+    const uintptr_t start_page = reinterpret_cast<uintptr_t>(p) >> 16;
+    const uintptr_t end_page = (reinterpret_cast<uintptr_t>(p) + size - 1) >> 16;
+    if (start_page == end_page) {
+        const uint32_t bit = uint32_t((start_page ^ (start_page >> 12)) & 4095);
+        return (g_ever_written_page_bits[bit >> 6] >> (bit & 63)) & 1;
+    }
+    if (end_page - start_page > 16) return true;
+    for (uintptr_t pg = start_page; pg <= end_page; pg++) {
+        const uint32_t bit = uint32_t((pg ^ (pg >> 12)) & 4095);
+        if ((g_ever_written_page_bits[bit >> 6] >> (bit & 63)) & 1) return true;
+    }
+    return false;
 }
 
 bool written_read(VkCommandBuffer cb, const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align, Upload& out) {

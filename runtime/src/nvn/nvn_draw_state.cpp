@@ -13,8 +13,11 @@ using namespace replay;
 
 namespace replay {
 uint32_t g_pipeline_state_version = 1;
+uint32_t g_dynamic_state_version = 1;
 uint32_t g_attrib_state_version = 1;
 uint32_t g_tex_state_version = 1;
+uint32_t g_targets_version = 1;
+uint32_t g_storage_state_version[kStages] = {1, 1, 1, 1, 1, 1};
 }
 
 void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const Targets& targets) {
@@ -27,14 +30,23 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (!s.has_viewport || std::memcmp(s.viewport, c.i, sizeof s.viewport) != 0) {
                 std::memcpy(s.viewport, c.i, sizeof s.viewport);
                 s.has_viewport = true;
+                g_dynamic_state_version++;
             }
             break;
-        case Cmd::SetRasterizerDiscard: s.rasterizer_discard = c.n != 0; break;
+        case Cmd::SetRasterizerDiscard: {
+            bool rd = c.n != 0;
+            if (s.rasterizer_discard != rd) {
+                s.rasterizer_discard = rd;
+                g_dynamic_state_version++;
+            }
+            break;
+        }
         case Cmd::SetPrimitiveRestart: {
             bool rst = c.n != 0;
             uint32_t idx = uint32_t(c.a[0]);
             if (s.restart != rst || s.restart_index != idx) {
                 s.restart = rst, s.restart_index = idx;
+                g_dynamic_state_version++;
                 if (!vk_dynamic_caps().primitive_restart_enable) g_pipeline_state_version++;
             }
             break;
@@ -59,10 +71,14 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (!s.has_scissor || std::memcmp(s.scissor, c.i, sizeof s.scissor) != 0) {
                 std::memcpy(s.scissor, c.i, sizeof s.scissor);
                 s.has_scissor = true;
+                g_dynamic_state_version++;
             }
             break;
         case Cmd::SetDepthRange:
-            s.depth_near = c.f[0], s.depth_far = c.f[1];
+            if (s.depth_near != c.f[0] || s.depth_far != c.f[1]) {
+                s.depth_near = c.f[0], s.depth_far = c.f[1];
+                g_dynamic_state_version++;
+            }
             break;
         case Cmd::BindProgram: {
             s.program = c.a[0];
@@ -78,7 +94,11 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             break;
         case Cmd::BindStorageBuffer:
             if (c.i[0] >= 0 && c.i[0] < kStages && c.i[1] >= 0 && c.i[1] < 16) {
-                s.storage[c.i[0]][c.i[1]] = {c.a[0], c.a[1]};
+                Range& dst = s.storage[c.i[0]][c.i[1]];
+                if (dst.address != c.a[0] || dst.size != c.a[1]) {
+                    dst = {c.a[0], c.a[1]};
+                    g_storage_state_version[c.i[0]]++;
+                }
             }
             break;
         case Cmd::BindDeferred: {
@@ -103,7 +123,14 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                     if (s.images[st][slot] != v0) s.images[st][slot] = v0, g_tex_state_version++;
                 }
                 if (c.mask == 2 && slot >= 0 && slot < 18) s.uniforms[st][slot] = {value(0), value(1)};
-                if (c.mask == 3 && slot >= 0 && slot < 16) s.storage[st][slot] = {value(0), value(1)};
+                if (c.mask == 3 && slot >= 0 && slot < 16) {
+                    uint64_t a0 = value(0), a1 = value(1);
+                    Range& dst = s.storage[st][slot];
+                    if (dst.address != a0 || dst.size != a1) {
+                        dst = {a0, a1};
+                        g_storage_state_version[st]++;
+                    }
+                }
             }
             break;
         }
@@ -128,25 +155,29 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             break;
         case Cmd::BindVertexAttribs:
             if (auto* p = blob(c.n * sizeof(VertexAttrib))) {
-                s.attribs.assign(reinterpret_cast<const VertexAttrib*>(p), reinterpret_cast<const VertexAttrib*>(p) + c.n);
-                g_attrib_state_version++;
-                g_pipeline_state_version++;
+                if (s.attribs.size() != c.n || std::memcmp(s.attribs.data(), p, c.n * sizeof(VertexAttrib)) != 0) {
+                    s.attribs.assign(reinterpret_cast<const VertexAttrib*>(p), reinterpret_cast<const VertexAttrib*>(p) + c.n);
+                    g_attrib_state_version++;
+                    g_pipeline_state_version++;
+                }
             }
             break;
         case Cmd::BindVertexStreams:
             if (auto* p = blob(c.n * sizeof(VertexStream))) {
-                const auto* vs = reinterpret_cast<const VertexStream*>(p);
-                bool need_pipe_bump = !vk_dynamic_caps().vertex_stride || s.streams.size() != c.n;
-                if (!need_pipe_bump) {
-                    for (uint32_t i = 0; i < c.n; i++) {
-                        if (s.streams[i].divisor != vs[i].divisor) {
-                            need_pipe_bump = true;
-                            break;
+                if (s.streams.size() != c.n || std::memcmp(s.streams.data(), p, c.n * sizeof(VertexStream)) != 0) {
+                    const auto* vs = reinterpret_cast<const VertexStream*>(p);
+                    bool need_pipe_bump = !vk_dynamic_caps().vertex_stride || s.streams.size() != c.n;
+                    if (!need_pipe_bump) {
+                        for (uint32_t i = 0; i < c.n; i++) {
+                            if (s.streams[i].divisor != vs[i].divisor) {
+                                need_pipe_bump = true;
+                                break;
+                            }
                         }
                     }
+                    s.streams.assign(vs, vs + c.n);
+                    if (need_pipe_bump) g_pipeline_state_version++;
                 }
-                s.streams.assign(vs, vs + c.n);
-                if (need_pipe_bump) g_pipeline_state_version++;
             }
             break;
         case Cmd::BindBlendState:
@@ -155,6 +186,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                 std::memcpy(&b, p, sizeof b);
                 if (b.target < 8 && std::memcmp(&s.blend[b.target], &b, sizeof b) != 0) {
                     s.blend[b.target] = b;
+                    g_dynamic_state_version++;
                     if (!vk_dynamic_caps().color_blend_equation) g_pipeline_state_version++;
                 }
             }
@@ -163,6 +195,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(ColorStateInfo))) {
                 if (std::memcmp(&s.color, p, sizeof s.color) != 0) {
                     std::memcpy(&s.color, p, sizeof s.color);
+                    g_dynamic_state_version++;
                     if (!vk_dynamic_caps().color_blend_enable) g_pipeline_state_version++;
                 }
             }
@@ -171,6 +204,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(ChannelMaskInfo))) {
                 if (std::memcmp(&s.mask, p, sizeof s.mask) != 0) {
                     std::memcpy(&s.mask, p, sizeof s.mask);
+                    g_dynamic_state_version++;
                     if (!vk_dynamic_caps().color_write_mask) g_pipeline_state_version++;
                 }
             }
@@ -179,6 +213,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(DepthStencilInfo))) {
                 if (std::memcmp(&s.depth, p, sizeof s.depth) != 0) {
                     std::memcpy(&s.depth, p, sizeof s.depth);
+                    g_dynamic_state_version++;
                     const DynamicStateCaps& dc = vk_dynamic_caps();
                     if (!(dc.depth_test_enable && dc.depth_write_enable && dc.depth_compare_op &&
                           dc.stencil_test_enable && dc.stencil_op && dc.depth_bias_enable))
@@ -190,6 +225,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(PolygonInfo))) {
                 if (std::memcmp(&s.polygon, p, sizeof s.polygon) != 0) {
                     std::memcpy(&s.polygon, p, sizeof s.polygon);
+                    g_dynamic_state_version++;
                     const DynamicStateCaps& dc = vk_dynamic_caps();
                     if (!(dc.cull_mode && dc.front_face && dc.polygon_mode && dc.depth_bias_enable && dc.stencil_op))
                         g_pipeline_state_version++;
@@ -200,11 +236,17 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             bool a2c = c.n != 0;
             if (s.alpha_to_coverage != a2c) {
                 s.alpha_to_coverage = a2c;
+                g_dynamic_state_version++;
                 if (!vk_dynamic_caps().alpha_to_coverage_enable) g_pipeline_state_version++;
             }
             break;
         }
-        case Cmd::SetBlendColor: std::memcpy(s.blend_color, c.f, sizeof s.blend_color); break;
+        case Cmd::SetBlendColor:
+            if (std::memcmp(s.blend_color, c.f, sizeof s.blend_color) != 0) {
+                std::memcpy(s.blend_color, c.f, sizeof s.blend_color);
+                g_dynamic_state_version++;
+            }
+            break;
         case Cmd::UpdateUniformBuffer: {  // (buffer address, size, offset, data): written in order, like the GPU
             uint64_t off = c.a[2];
             // NX_TRACE_UUB=<first draw>: logs 40 updates from that draw on.

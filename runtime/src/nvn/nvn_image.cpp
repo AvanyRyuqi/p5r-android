@@ -6,6 +6,7 @@
 #include <tuple>
 
 #include "nvn_vk.h"
+#include "platform.h"
 
 namespace nx::nvn {
 
@@ -104,13 +105,34 @@ int32_t hud_quarters() {
     return q;
 }
 
-bool low_3d_on() {
-    static const bool on = [] {
-        const char* e = std::getenv("NX_LOW_3D");
-        return e && e[0] == '1';
+namespace {
+int low_3d_mode() {
+    static const int m = [] {
+        if (const char* e = std::getenv("NX_LOW_3D"); e && e[0] != '\0') {
+            if (e[0] == '0') return 0;
+            if (e[0] == '2' || std::strstr(e, "360")) return 2;  // 2/3 (640x360)
+            return 1;                                            // 3/4 (720x405)
+        }
+        for (const char* k : {"NX_RES", "NX_RENDER_RES", "RESOLUTION", "resolution"}) {
+            if (const char* r = std::getenv(k); r && r[0]) {
+                if (std::strncmp(r, "360", 3) == 0) return 2;
+                if (std::strncmp(r, "480", 3) == 0) return 1;
+            }
+        }
+        std::string cfg = plat::setting("NX_RES");
+        if (cfg.empty()) cfg = plat::setting("RESOLUTION");
+        if (cfg.empty()) cfg = plat::setting("resolution");
+        if (cfg == "360p" || cfg == "360") return 2;
+        if (cfg == "480p" || cfg == "480") return 1;
+        return 0;
     }();
-    return on;
+    return m;
 }
+}  // namespace
+
+bool low_3d_on() { return low_3d_mode() > 0; }
+int32_t low_3d_num() { return low_3d_mode() == 2 ? 2 : 3; }
+int32_t low_3d_den() { return low_3d_mode() == 2 ? 3 : 4; }
 
 bool low_3d_texture(const Texture& t) {
     if (!low_3d_on() || t.stride) return false;
@@ -141,17 +163,17 @@ GpuImage* image_of(uint64_t guest) {
     bool widened = t->format == 0x1 && t->pool_swizzle == 0x02010101u;
     if (share && t->memory && (old_rule ? t->pool_swizzle == 0 : !widened))
         if (auto it = g_live_images.find(key); it != g_live_images.end())
-            if (auto shared = it->second.lock(); shared && shared->image && !shared->alpha_from_r) {
+            if (auto shared = it->second.lock(); shared && shared->image && !shared->alpha_from_r && !shared->retired) {
                 static uint64_t shares = 0;
                 if (++shares % 1000 == 1) log("nvn/vk: %llu textures shared an image with another", (unsigned long long)shares);
                 t->image = shared;
-                // A CPU-written (pitch-linear) texture made again over memory another live object still covers: the
-                // image holds what that one uploaded, the memory may hold more. P5R makes a texture per film picture
-                // over a ring of six NV12 buffers; when the previous object over a buffer was not finalized yet, the
-                // new picture's luma was never uploaded and the film showed the picture of six frames before for one
-                // or two frames (its stutter, 21% of the frames on the Adreno 610). NX_SHARE_KEEP=1: as before.
+                // A texture made again over memory another live object still covers (or whose finalized owner is still
+                // held in defer_object / g_grave across g_max_replays): the image holds what that earlier texture
+                // uploaded, while guest pool memory now holds the new texture's texels. Mark non-rendered shared images
+                // dirty so block-linear streamed textures (Shibuya foliage/UI/character maps) re-upload instead of
+                // displaying stale normal/mask textures. NX_SHARE_KEEP=1: as before.
                 static const bool keep = std::getenv("NX_SHARE_KEEP") != nullptr;
-                if (!keep && t->stride && !shared->rendered) t->mark_dirty(0, UINT64_MAX);
+                if (!keep && !shared->rendered) t->mark_dirty(0, UINT64_MAX);
                 return shared.get();
             }
     if ((t->image = reuse_image(*t))) return t->image.get();
@@ -175,8 +197,8 @@ GpuImage* image_of(uint64_t guest) {
     if (hud_1080_texture(*t)) img->hud = true, img->width = uint32_t(hud_up(1280)), img->height = uint32_t(hud_up(720));
     if (low_3d_texture(*t)) {
         img->low_3d = true;
-        img->width = std::max(1u, (t->width * 3) / 4);   // 960->720, 480->360, 240->180
-        img->height = std::max(1u, (t->height * 3) / 4); // 540->405, 270->202, 135->101
+        img->width = std::max(1u, uint32_t(low_3d_down(int32_t(t->width))));
+        img->height = std::max(1u, uint32_t(low_3d_down(int32_t(t->height))));
     }
     static const bool low_shadows = [] {
         const char* e = std::getenv("NX_MALI_LOW_SHADOWS");
@@ -276,6 +298,19 @@ GpuImage* image_of(uint64_t guest) {
         }();
         img->storage = !no_storage && !compressed && !aspect && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
         if (img->storage) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    if (auto pooled = take_free_image(*img)) {
+        pooled->nvn_format = img->nvn_format;
+        pooled->uw = img->uw;
+        pooled->hud = img->hud;
+        pooled->low_3d = img->low_3d;
+        pooled->shadow = img->shadow;
+        constexpr VkComponentSwizzle kSwizzle[] = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R,
+                                                   VK_COMPONENT_SWIZZLE_G,    VK_COMPONENT_SWIZZLE_B,   VK_COMPONENT_SWIZZLE_A};
+        pooled->swizzle = {kSwizzle[t->swizzle[0]], kSwizzle[t->swizzle[1]], kSwizzle[t->swizzle[2]], kSwizzle[t->swizzle[3]]};
+        t->image = pooled;
+        if (t->memory) g_live_images[key] = pooled;
+        return pooled.get();
     }
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (!image_supported(ci, t->format)) return nullptr;
