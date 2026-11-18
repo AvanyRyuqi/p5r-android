@@ -160,12 +160,20 @@ struct ResolvedTexture {
     bool ready_cached = false;
 };
 struct DrawTextures {
-    TexBindings bindings;  // the set 2 bindings of the program's stages
+    TexBindings bindings;  // the set 2 bindings of the program's stages (fallback storage when unslotted)
     std::vector<uint64_t> handles;
     std::vector<ResolvedTexture> resolved;
+    const TexBindings* bind_ptr = &bindings;
+    std::vector<uint64_t>* hand_ptr = &handles;
+    std::vector<ResolvedTexture>* res_ptr = &resolved;
     bool set2_unchanged = false;
     bool same_shader_as_last = false;
     uint64_t serial = 0;  // bumped whenever any binding of the draw differs from the one before
+    const TexBindings& active_bindings() const { return *bind_ptr; }
+    const std::vector<uint64_t>& active_handles() const { return *hand_ptr; }
+    std::vector<uint64_t>& active_handles() { return *hand_ptr; }
+    const std::vector<ResolvedTexture>& active_resolved() const { return *res_ptr; }
+    std::vector<ResolvedTexture>& active_resolved() { return *res_ptr; }
 };
 extern DrawTextures g_textures;  // filled by gather_textures, read by build_sets and the traces of the same draw
 enum : uint32_t { kNeedBreak = 1, kSampledPending = 2 };

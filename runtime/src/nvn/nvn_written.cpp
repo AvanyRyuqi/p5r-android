@@ -370,10 +370,26 @@ static uint64_t s_stream_valid_gen = 0;
 static const uint8_t* s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
 static const uint8_t* s_stream_hi = nullptr;
 
+constexpr size_t kVertexCacheSlots = 256;
+static StreamCacheEntry s_vertex_cache[kVertexCacheSlots];
+static uint64_t s_vertex_valid_words[kVertexCacheSlots / 64] = {};
+static uint32_t s_vertex_group_mask = 0;
+static uint64_t s_vertex_page_bloom = 0;
+
+inline uint64_t vertex_bloom_bit(const uint8_t* p) {
+    const uintptr_t pg = reinterpret_cast<uintptr_t>(p) >> 16;
+    return 1ull << ((pg ^ (pg >> 6)) & 63);
+}
+
 void stream_cache_invalidate(const uint8_t* p, uint64_t size) {
-    if (!p || !size || !s_stream_valid_mask || p >= s_stream_hi || p + size <= s_stream_lo) return;
+    if (!p || !size || (!s_stream_valid_mask && !s_vertex_group_mask) || p >= s_stream_hi || p + size <= s_stream_lo) return;
     if (s_stream_valid_gen != dedup_generation()) {
         s_stream_valid_mask = 0;
+        if (s_vertex_group_mask) {
+            std::memset(s_vertex_valid_words, 0, sizeof s_vertex_valid_words);
+            s_vertex_group_mask = 0;
+            s_vertex_page_bloom = 0;
+        }
         s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
         s_stream_hi = nullptr;
         return;
@@ -390,6 +406,29 @@ void stream_cache_invalidate(const uint8_t* p, uint64_t size) {
             s_stream_cache[s].host_p = nullptr;
             s_stream_valid_mask &= ~(1u << s);
         }
+    }
+    if (!s_vertex_group_mask) return;
+    if ((reinterpret_cast<uintptr_t>(p) >> 16) == ((reinterpret_cast<uintptr_t>(p_end) - 1) >> 16) &&
+        !(s_vertex_page_bloom & vertex_bloom_bit(p)))
+        return;
+    uint32_t gm = s_vertex_group_mask;
+    while (gm) {
+        const size_t w = uint32_t(__builtin_ctz(gm));
+        gm &= gm - 1;
+        uint64_t vm = s_vertex_valid_words[w];
+        while (vm) {
+            const uint32_t bit = uint32_t(__builtin_ctzll(vm));
+            vm &= vm - 1;
+            const size_t k = (w << 6) | bit;
+            if (s_vertex_cache[k].host_p &&
+                p < s_vertex_cache[k].host_p + s_vertex_cache[k].size &&
+                s_vertex_cache[k].host_p < p_end) {
+                s_vertex_cache[k].address = 0;
+                s_vertex_cache[k].host_p = nullptr;
+                s_vertex_valid_words[w] &= ~(1ull << bit);
+            }
+        }
+        if (!s_vertex_valid_words[w]) s_vertex_group_mask &= ~(1u << w);
     }
 }
 
@@ -416,6 +455,11 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
     if (s_stream_valid_gen != cur_gen) {
         s_stream_valid_gen = cur_gen;
         s_stream_valid_mask = 0;
+        if (s_vertex_group_mask) {
+            std::memset(s_vertex_valid_words, 0, sizeof s_vertex_valid_words);
+            s_vertex_group_mask = 0;
+            s_vertex_page_bloom = 0;
+        }
         s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
         s_stream_hi = nullptr;
     }
@@ -429,6 +473,21 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
             in.vertex[s] = s_stream_cache[s].upload;
             continue;
         }
+        const size_t vc_base = ((r.address >> 4) ^ (r.address >> 12)) & (kVertexCacheSlots - 1);
+        if (r.address) {
+            bool hit = false;
+            for (size_t step = 0; step < 4; step++) {
+                const StreamCacheEntry& vc = s_vertex_cache[(vc_base + step) & (kVertexCacheSlots - 1)];
+                if (vc.address == r.address && vc.size == r.size && vc.gen == cur_gen) {
+                    in.vertex[s] = vc.upload;
+                    s_stream_cache[s] = vc;
+                    if (vc.host_p) s_stream_valid_mask |= (1u << s);
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) continue;
+        }
         const uint8_t* p = r.address ? guest_bytes(r.address) : nullptr;
         uint64_t size = p ? std::min<uint64_t>(r.size, 64ull << 20) : 0;
         g_upload_kind = kUploadVertex;
@@ -439,6 +498,24 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
             s_stream_valid_mask |= (1u << s);
             if (p < s_stream_lo) s_stream_lo = p;
             if (p + r.size > s_stream_hi) s_stream_hi = p + r.size;
+            if (r.address) {
+                size_t put_idx = vc_base;
+                for (size_t step = 0; step < 4; step++) {
+                    size_t cand = (vc_base + step) & (kVertexCacheSlots - 1);
+                    if (s_vertex_cache[cand].gen != cur_gen || s_vertex_cache[cand].address == 0) {
+                        put_idx = cand;
+                        break;
+                    }
+                }
+                s_vertex_cache[put_idx] = s_stream_cache[s];
+                const size_t w = put_idx >> 6;
+                s_vertex_valid_words[w] |= 1ull << (put_idx & 63);
+                s_vertex_group_mask |= 1u << w;
+                if ((reinterpret_cast<uintptr_t>(p) >> 16) == ((reinterpret_cast<uintptr_t>(p + r.size) - 1) >> 16))
+                    s_vertex_page_bloom |= vertex_bloom_bit(p);
+                else
+                    s_vertex_page_bloom = ~0ull;
+            }
         }
     }
     if (!indexed) return true;
