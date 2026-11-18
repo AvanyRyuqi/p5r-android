@@ -34,6 +34,34 @@ struct DedupSpan {
 // Recorded spans in the current submit for linear invalidation, keeping reserved capacity across submits.
 std::vector<DedupSpan> g_copies;
 uint64_t g_saved = 0, g_copied = 0;
+uint64_t g_dedup_page_bits[64] = {};
+uint64_t g_uploads_since_inval = 0;
+const uint8_t* s_last_inval_p = nullptr;
+uint64_t s_last_inval_size = 0;
+
+inline void mark_dedup_pages(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return;
+    const uintptr_t first = uintptr_t(p) >> 12;
+    const uintptr_t last = (uintptr_t(p) + size - 1) >> 12;
+    if (last - first >= 64) {
+        for (uint64_t& w : g_dedup_page_bits) w = ~0ull;
+        return;
+    }
+    for (uintptr_t pg = first; pg <= last; pg++) {
+        g_dedup_page_bits[(pg >> 6) & 63] |= 1ull << (pg & 63);
+    }
+}
+
+inline bool may_overlap_dedup_pages(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return false;
+    const uintptr_t first = uintptr_t(p) >> 12;
+    const uintptr_t last = (uintptr_t(p) + size - 1) >> 12;
+    if (last - first >= 64) return true;
+    for (uintptr_t pg = first; pg <= last; pg++) {
+        if (g_dedup_page_bits[(pg >> 6) & 63] & (1ull << (pg & 63))) return true;
+    }
+    return false;
+}
 
 // Open-addressed front hash table (linear probing) per address hash. Slots of the current generation hold active
 // entries or tombstones (p == nullptr) from dedup_invalidate; dedup_reset advances the generation in O(1).
@@ -42,14 +70,14 @@ struct Front {
     uint64_t generation = 0;
     Entry entry;
 };
-constexpr size_t kFrontSlots = 65536;
+constexpr size_t kFrontSlots = 16384;
 constexpr uint32_t kMaxProbe = 8;
 Front g_front[kFrontSlots];
 uint64_t g_generation = 1;
 static uint64_t s_dedup_inval = 1;
 inline uint32_t front_index_of(const uint8_t* p) {
     const uintptr_t v = uintptr_t(p);
-    return uint32_t(((v >> 4) ^ (v >> 12) ^ (v >> 21) ^ (v >> 30)) & (kFrontSlots - 1));
+    return uint32_t(((v >> 4) ^ (v >> 12) ^ (v >> 20) ^ (v >> 28)) & (kFrontSlots - 1));
 }
 
 // NX_UPLOAD_STATS: bytes copied per kind, and of those the bytes equal to the last copy of the same address and size.
@@ -135,9 +163,11 @@ Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t a
         s_last_dedup_p = p;
         s_last_dedup_gen = g_generation;
         s_last_dedup_entry = ent;
+        g_uploads_since_inval++;
         if (!existing || size > prev_size) {
             if (g_copies.capacity() < 1024) g_copies.reserve(1024);
             g_copies.push_back({p, size, target_idx});
+            mark_dedup_pages(p, size);
         }
     };
     Upload u;
@@ -159,16 +189,24 @@ uint64_t dedup_inval_epoch() { return s_dedup_inval; }
 
 void dedup_reset() {
     g_copies.clear(), g_generation++;
+    std::memset(g_dedup_page_bits, 0, sizeof g_dedup_page_bits);
+    g_uploads_since_inval = 0;
+    s_last_inval_p = nullptr;
+    s_last_inval_size = 0;
     s_last_dedup_p = nullptr;
 }
 
 void dedup_invalidate(const uint8_t* p, uint64_t size) {
     s_dedup_inval++;
+    if (g_uploads_since_inval == 0 && p == s_last_inval_p && size <= s_last_inval_size) return;
+    s_last_inval_p = p;
+    s_last_inval_size = size;
+    g_uploads_since_inval = 0;
     stream_cache_invalidate(p, size);
     index_cache_invalidate(p, size);
     sets_invalidate_range(p, size);
     s_last_dedup_p = nullptr;
-    if (!p || !size || g_copies.empty()) return;
+    if (!p || !size || g_copies.empty() || !may_overlap_dedup_pages(p, size)) return;
     const uint8_t* const end = p + size;
     size_t kept = 0;
     for (size_t i = 0; i < g_copies.size(); i++) {

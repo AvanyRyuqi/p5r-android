@@ -185,8 +185,14 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
     // NX_NO_UPLOAD_GUARD=1 too; bisecting).
     static const bool narrow = std::getenv("NX_R11G11B10_NARROW") != nullptr;
     bool widen = !narrow && t.format == 0x3f && img.format == VK_FORMAT_R16G16B16A16_SFLOAT && !img.alpha_from_r;
-    std::vector<uint8_t> linear;
-    std::vector<VkBufferImageCopy> copies;
+    static thread_local std::vector<uint8_t> linear;
+    static thread_local std::vector<VkBufferImageCopy> copies;
+    if (linear.capacity() > (16ull << 20)) {
+        std::vector<uint8_t>().swap(linear);
+    } else {
+        linear.clear();
+    }
+    copies.clear();
     uint32_t layers = img.view_type == VK_IMAGE_VIEW_TYPE_3D ? std::max(1u, t.depth) : img.layers;
     if (img.alpha_from_r && t.stride) {  // R8 pitch-linear -> RGBA8 (255, 255, 255, R), level 0
         const uint8_t* src = reinterpret_cast<const uint8_t*>(t.memory);
@@ -247,7 +253,7 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
             }
             staged = uint64_t(t.stride) * (y1 - y0) * layers;
             u = texture_stage(staged);
-            std::memcpy(u.ptr, reinterpret_cast<const uint8_t*>(t.memory) + y0 * t.stride, staged);
+            plat::fast_memcpy(u.ptr, reinterpret_cast<const uint8_t*>(t.memory) + y0 * t.stride, staged);
             r.bufferRowLength = t.stride / bytes * bw;
         }
         r.bufferOffset = u.offset;
@@ -294,7 +300,7 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
     if (widen)
         widen_r11g11b10(linear.data(), u.ptr, linear.size() / 4);
     else
-        std::memcpy(u.ptr, linear.data(), linear.size());
+        plat::fast_memcpy(u.ptr, linear.data(), linear.size());
     for (uint32_t k = 0; k < levels.size(); k++) {
         VkBufferImageCopy r{};
         r.bufferOffset = u.offset + levels[k].offset * scale;
@@ -345,7 +351,7 @@ bool upload_region(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint32_t
         for (uint64_t k = 0; k < blocks; k++) out[k] = 0x00FFFFFFu | (uint32_t(src[k]) << 24);
     } else if (host_bytes == bytes) {
         u = texture_stage(blocks * bytes);
-        std::memcpy(u.ptr, src, blocks * bytes);
+        plat::fast_memcpy(u.ptr, src, blocks * bytes);
     } else {
         static std::set<uint32_t> logged;
         if (logged.insert(t.format).second)

@@ -70,6 +70,17 @@ MemoryPool* pool_at_gpu(uint64_t gpu, uint64_t* offset) {
 ViewInfo read_view(CPU& c, uint64_t view) {
     ViewInfo v;
     if (!view) return v;
+    struct ViewCacheSlot {
+        bool valid = false;
+        uint64_t r[5] = {};
+        ViewInfo val{};
+    };
+    static thread_local ViewCacheSlot s_view_cache[256];
+    uint64_t r[5] = {ld<uint64_t>(view), ld<uint64_t>(view + 8), ld<uint64_t>(view + 16), ld<uint64_t>(view + 24),
+                     ld<uint64_t>(view + 32)};
+    uint64_t h = r[0] ^ (r[1] * 0x9E3779B97F4A7C15ull) ^ r[2] ^ (r[3] * 0xC2B2AE3D27D4EB4Full) ^ r[4];
+    ViewCacheSlot& slot = s_view_cache[((h >> 32) ^ h) & 255];
+    if (__builtin_expect(slot.valid && std::memcmp(slot.r, r, sizeof r) == 0, 1)) return slot.val;
     uint64_t tmp = scratch(c, 16);
     // Each getter returns whether the view sets that property.
     if (driver(c, "nvnTextureViewGetLevels", {view, tmp, tmp + 4}) & 1)
@@ -80,6 +91,9 @@ ViewInfo read_view(CPU& c, uint64_t view) {
     if (driver(c, "nvnTextureViewGetSwizzle", {view, tmp, tmp + 4, tmp + 8, tmp + 12}) & 1)
         for (int k = 0; k < 4; k++) v.swizzle |= std::min<uint32_t>(ld<uint32_t>(tmp + 4 * k), 5) << (8 * k);
     if (driver(c, "nvnTextureViewGetFormat", {view, tmp}) & 1) v.format = ld<uint32_t>(tmp);
+    slot.valid = true;
+    std::memcpy(slot.r, r, sizeof r);
+    slot.val = v;
     return v;
 }
 

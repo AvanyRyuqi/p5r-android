@@ -36,8 +36,8 @@ namespace {
 constexpr uint64_t kBlock = 16ull << 20;  // bytes per memory block
 constexpr uint64_t kAlign = 256;          // every copy: the largest buffer offset alignment Vulkan allows
 constexpr uint64_t kMaxCopy = 4ull << 20; // larger ranges stay in the ring (one copy per submit)
-constexpr uint64_t kStaleSubmits = 3600;  // keep resident across camera turns (~1200 frames)
-constexpr uint32_t kStableSeen = 4;       // survive across a 3-submit frame boundary before entering g_entries
+constexpr uint64_t kStaleSubmits = 1800;  // keep resident across camera turns (~600 frames) without swap bloat
+constexpr uint32_t kStableSeen = 3;       // 3 consecutive matching submits before entering g_entries
 constexpr uint64_t kSeenGap = 24;         // tolerate temporary frustum-cull intervals (~8 frames)
 constexpr uint32_t kClasses = 15;         // copy sizes 256 B << class, up to 4 MB
 
@@ -63,12 +63,13 @@ struct SeenSlot {
     uint64_t skip_until = 0;
     uint64_t submit = 0;  // g_submits when last seen
 };
-constexpr uint32_t kSeenSlots = 16384;
+constexpr uint32_t kSeenSlots = 32768;
+constexpr uint32_t kSeenProbe = 4;
 SeenSlot g_seen_slots[kSeenSlots];
 
 inline uint32_t seen_slot_index(const uint8_t* p) {
     uint64_t v = reinterpret_cast<uintptr_t>(p);
-    return uint32_t(((v >> 4) ^ (v >> 14) ^ (v >> 24)) & (kSeenSlots - 1));
+    return uint32_t(((v >> 4) ^ (v >> 13) ^ (v >> 22) ^ (v * 0x9E3779B97F4A7C15ull >> 48)) & (kSeenSlots - 1));
 }
 
 struct PageChurn {
@@ -76,12 +77,18 @@ struct PageChurn {
     uint16_t unstable_count = 0;
     uint32_t last_window = 0;
     uint64_t skip_until = 0;
+    uint64_t cached_bloom = 0;
 };
 constexpr uint32_t kPageSlots = 65536;
 PageChurn g_page_churn[kPageSlots];
 
 inline uint32_t page_churn_index(const uint8_t* p) {
     return uint32_t((reinterpret_cast<uintptr_t>(p) >> 16) & (kPageSlots - 1));
+}
+
+inline uint64_t page_bloom_bit(const uint8_t* p) {
+    const uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    return 1ull << (((v >> 4) ^ (v >> 10)) & 63);
 }
 
 struct UnstableSlot {
@@ -114,13 +121,42 @@ struct EntryFront {
     Entry* entry = nullptr;
     uint64_t gen = 0;
 };
-constexpr uint32_t kEntryFrontSlots = 8192;
+constexpr uint32_t kEntryFrontSlots = 32768;
+constexpr uint32_t kEntryFrontProbe = 4;
 EntryFront g_entry_front[kEntryFrontSlots];
 uint64_t g_entry_front_gen = 1;
 
 inline uint32_t entry_front_index(const uint8_t* p) {
     const uintptr_t v = reinterpret_cast<uintptr_t>(p);
-    return uint32_t(((v >> 4) ^ (v >> 13) ^ (v >> 21)) & (kEntryFrontSlots - 1));
+    return uint32_t(((v >> 4) ^ (v >> 13) ^ (v >> 21) ^ (v * 0x9E3779B97F4A7C15ull >> 48)) & (kEntryFrontSlots - 1));
+}
+
+inline Entry* find_entry_front(const uint8_t* p, EntryFront*& slot_out) {
+    const uint32_t base = entry_front_index(p);
+    EntryFront* empty_slot = nullptr;
+    for (uint32_t step = 0; step < kEntryFrontProbe; step++) {
+        EntryFront& ef = g_entry_front[(base + step) & (kEntryFrontSlots - 1)];
+        if (ef.gen == g_entry_front_gen && ef.p == p) {
+            slot_out = &ef;
+            return ef.entry;
+        }
+        if (!empty_slot && (ef.gen != g_entry_front_gen || ef.p == nullptr)) {
+            empty_slot = &ef;
+        }
+    }
+    slot_out = empty_slot ? empty_slot : &g_entry_front[base];
+    return nullptr;
+}
+
+inline void clear_entry_front(const uint8_t* p) {
+    const uint32_t base = entry_front_index(p);
+    for (uint32_t step = 0; step < kEntryFrontProbe; step++) {
+        EntryFront& ef = g_entry_front[(base + step) & (kEntryFrontSlots - 1)];
+        if (ef.gen == g_entry_front_gen && ef.p == p) {
+            ef.p = nullptr;
+            ef.entry = nullptr;
+        }
+    }
 }
 
 uint64_t full_hash_memory(const uint8_t* p, uint64_t size) {
@@ -130,8 +166,8 @@ uint64_t full_hash_memory(const uint8_t* p, uint64_t size) {
 }
 
 uint64_t fast_sample_hash(const uint8_t* p, uint64_t size) {
-    if (size <= 4096) return full_hash_memory(p, size);
-    constexpr uint64_t kChunk = 128;
+    if (size <= 192) return full_hash_memory(p, size);
+    constexpr uint64_t kChunk = 64;
     const uint64_t mid = (size / 2) & ~7ull;
     const uint64_t tail = (size - kChunk) & ~7ull;
     uint64_t h = hash_memory(p, kChunk);
@@ -177,7 +213,7 @@ bool on() {
 
 uint64_t budget() {
     if (!g_budget) {
-        long mb = std::getenv("NX_BUFFER_CACHE_MB") ? std::atol(std::getenv("NX_BUFFER_CACHE_MB")) : 128;
+        long mb = std::getenv("NX_BUFFER_CACHE_MB") ? std::atol(std::getenv("NX_BUFFER_CACHE_MB")) : 64;
         g_budget = uint64_t(std::clamp(mb, 16l, 1024l)) << 20;
     }
     return g_budget;
@@ -224,19 +260,21 @@ void retire(const Entry& e) {
 
 // Copies no submit bound lately, retired (their memory comes back once those submits are done).
 void evict_stale() {
-    bool erased = false;
+    const uint64_t stale_limit = (g_used < budget() / 2) ? (kStaleSubmits * 3) : kStaleSubmits;
     for (auto it = g_entries.begin(); it != g_entries.end();)
-        if (it->second.seen + kStaleSubmits < g_submits) {
+        if (it->second.seen + stale_limit < g_submits) {
+            const uint8_t* key_p = it->first;
+            clear_entry_front(key_p);
             retire(it->second);
             g_stats_cache.evicted++;
-            PageChurn& pc = g_page_churn[page_churn_index(it->first)];
-            if (pc.cached_count > 0) pc.cached_count--;
+            PageChurn& pc = g_page_churn[page_churn_index(key_p)];
+            if (pc.cached_count > 0) {
+                if (--pc.cached_count == 0) pc.cached_bloom = 0;
+            }
             it = g_entries.erase(it);
-            erased = true;
         } else {
             ++it;
         }
-    if (erased) g_entry_front_gen++;
 }
 
 // A slot of class c: a freed one, else carved from the last block (a new block when it is full).
@@ -295,20 +333,22 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
 
     PageChurn& pc = g_page_churn[page_churn_index(p)];
 
-    // Check if this buffer is already cached (via O(1) direct-mapped front cache before page-churn & g_entries)
-    EntryFront& ef = g_entry_front[entry_front_index(p)];
-    Entry* found_entry = nullptr;
-    if (ef.gen == g_entry_front_gen && ef.p == p) {
-        found_entry = ef.entry;
-    } else {
-        if (pc.cached_count == 0 && pc.skip_until > g_submits) {
+    // Check if this buffer is already cached (via O(1) 4-probe front cache before page-churn & g_entries)
+    EntryFront* ef_slot = nullptr;
+    Entry* found_entry = find_entry_front(p, ef_slot);
+    if (!found_entry) {
+        const uint64_t b_bit = page_bloom_bit(p);
+        if ((pc.cached_bloom & b_bit) == 0 && pc.skip_until > g_submits) {
             g_stats_cache.unstable++;
             return false;
         }
-        if (auto it = g_entries.find(p); it != g_entries.end()) {
-            found_entry = &it->second;
-            ef = {p, found_entry, g_entry_front_gen};
-        } else if (pc.skip_until > g_submits) {
+        if ((pc.cached_bloom & b_bit) != 0 && pc.cached_count > 0) {
+            if (auto it = g_entries.find(p); it != g_entries.end()) {
+                found_entry = &it->second;
+                *ef_slot = {p, found_entry, g_entry_front_gen};
+            }
+        }
+        if (!found_entry && pc.skip_until > g_submits) {
             g_stats_cache.unstable++;
             return false;
         }
@@ -316,24 +356,19 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
 
     if (found_entry) {
         Entry& e = *found_entry;
-        // Fast path: skip re-hashing guest RAM within the same submit, or within the same frame once highly stable.
+        const bool is_3d_geom = g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex);
         if (!verify && e.size == size && e.padded == padded && e.block < g_blocks.size() &&
-            g_blocks[e.block].buffer != VK_NULL_HANDLE) {
-            const bool already_verified = (e.last_verified_submit == g_submits) ||
-                                          (e.verified_streak >= 8 && e.last_verified_frame == cur_frame);
-            if (already_verified) {
-                e.serial = std::max(e.serial, frame_recording_serial());
-                e.seen = g_submits;
-                g_stats_cache.hits++;
-                g_stats_cache.hit_bytes += padded;
-                out = {g_blocks[e.block].buffer, e.offset, g_blocks[e.block].ptr + e.offset};
-                return true;
-            }
+            g_blocks[e.block].buffer != VK_NULL_HANDLE && e.last_verified_submit == g_submits) {
+            e.serial = std::max(e.serial, frame_recording_serial());
+            e.seen = g_submits;
+            g_stats_cache.hits++;
+            g_stats_cache.hit_bytes += padded;
+            out = {g_blocks[e.block].buffer, e.offset, g_blocks[e.block].ptr + e.offset};
+            return true;
         }
 
         const uint64_t t0 = time_hash ? plat::monotonic_ns() : 0;
-        const bool can_sample = (size > 4096 && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex) &&
-                                 e.verified_streak >= 6 && ((g_submits + (uintptr_t(p) >> 8)) & 15) != 0);
+        const bool can_sample = (is_3d_geom && size > 512 && e.verified_streak >= 3);
         bool match = false;
         if (can_sample) {
             uint64_t sh = fast_sample_hash(p, size);
@@ -346,7 +381,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
 
         if (match) {
             e.last_verified_submit = g_submits;
-            e.last_verified_frame = cur_frame;
+            e.last_verified_frame = is_3d_geom ? (cur_frame + ((reinterpret_cast<uintptr_t>(p) >> 8) & 7ull)) : cur_frame;
             if (e.verified_streak < 1000) e.verified_streak++;
             // NX_BUFFER_CACHE_VERIFY=1: every hit compared with the guest bytes (slow: the copy is uncached memory).
             if (verify && std::memcmp(g_blocks[e.block].ptr + e.offset, p, size) != 0) {
@@ -361,13 +396,32 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
             return true;
         }
         retire(e);  // read by the submits up to e.serial: freed after them
-        if (pc.cached_count > 0) pc.cached_count--;
+        if (pc.cached_count > 0) {
+            if (--pc.cached_count == 0) pc.cached_bloom = 0;
+        }
+        clear_entry_front(p);
         g_entries.erase(p);
-        g_entry_front_gen++;
     }
 
-    // Not cached: track candidate stability in a flat zero-allocation slot table until promoted to kStableSeen.
-    SeenSlot& seen = g_seen_slots[seen_slot_index(p)];
+    // Not cached: track candidate stability in a 4-way set-associative zero-allocation slot table until promoted.
+    const uint32_t s_base = seen_slot_index(p);
+    SeenSlot* seen_ptr = nullptr;
+    SeenSlot* oldest_slot = &g_seen_slots[s_base];
+    for (uint32_t step = 0; step < kSeenProbe; step++) {
+        SeenSlot& cand = g_seen_slots[(s_base + step) & (kSeenSlots - 1)];
+        if (cand.p == p) {
+            seen_ptr = &cand;
+            break;
+        }
+        if (cand.p == nullptr) {
+            oldest_slot = &cand;
+            break;
+        }
+        if (cand.submit < oldest_slot->submit) {
+            oldest_slot = &cand;
+        }
+    }
+    SeenSlot& seen = seen_ptr ? *seen_ptr : *oldest_slot;
     if (seen.p == p && seen.skip_until > g_submits) {
         seen.submit = g_submits;
         g_stats_cache.unstable++;
@@ -375,14 +429,12 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
     }
 
     const uint64_t t0 = time_hash ? plat::monotonic_ns() : 0;
-    const uint64_t sh = fast_sample_hash(p, size);
+    const bool is_3d_cand = g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex);
+    const uint64_t sh = is_3d_cand ? fast_sample_hash(p, size) : full_hash_memory(p, size);
     if (time_hash) g_stats_cache.hash_ns += plat::monotonic_ns() - t0;
 
     const uint64_t serial = frame_recording_serial();
     if (seen.p != p) {
-        if (seen.submit != 0 && seen.submit + 4 >= g_submits && seen.count == 1) {
-            record_page_churn(pc);
-        }
         seen = {p, size, sh, 1, 0, 0, g_submits};
     } else if (seen.size == size && seen.hash == sh && seen.submit + kSeenGap >= g_submits) {
         seen.count++;
@@ -416,9 +468,9 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
     }
     seen = {};
     if (g_unstable_front[u_idx].p == p) g_unstable_front[u_idx].p = nullptr;
-    const uint64_t t1 = (time_hash && size > 4096) ? plat::monotonic_ns() : 0;
-    const uint64_t h = size > 4096 ? full_hash_memory(p, size) : sh;
-    if (time_hash && size > 4096) g_stats_cache.hash_ns += plat::monotonic_ns() - t1;
+    const uint64_t t1 = (time_hash && is_3d_cand && size > 192) ? plat::monotonic_ns() : 0;
+    const uint64_t h = (is_3d_cand && size > 192) ? full_hash_memory(p, size) : sh;
+    if (time_hash && is_3d_cand && size > 192) g_stats_cache.hash_ns += plat::monotonic_ns() - t1;
     g_used += class_bytes(c);
     uint8_t* dst = g_blocks[slot.block].ptr + slot.offset;
     frame_guest_read(p, size);
@@ -428,10 +480,11 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
         p, Entry{size, padded, h, sh, slot.block, slot.offset, c, 1, serial, g_submits, g_submits, cur_frame});
     if (inserted && pc.cached_count < UINT16_MAX) {
         pc.cached_count++;
+        pc.cached_bloom |= page_bloom_bit(p);
         pc.skip_until = 0;
         pc.unstable_count = 0;
     }
-    ef = {p, &ins_it->second, g_entry_front_gen};
+    *ef_slot = {p, &ins_it->second, g_entry_front_gen};
     g_stats_cache.misses++, g_stats_cache.miss_bytes += padded;
     out = {g_blocks[slot.block].buffer, slot.offset, dst};
     return true;

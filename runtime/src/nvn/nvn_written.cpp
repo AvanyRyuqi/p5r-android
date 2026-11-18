@@ -54,6 +54,36 @@ using It = Regions::iterator;
 Regions g_regions;
 const uint8_t* g_regions_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
 const uint8_t* g_regions_hi = nullptr;
+uint64_t g_regions_page_bits[64] = {};
+
+inline void mark_written_pages(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return;
+    const uintptr_t start_page = reinterpret_cast<uintptr_t>(p) >> 16;
+    const uintptr_t end_page = (reinterpret_cast<uintptr_t>(p) + size - 1) >> 16;
+    if (end_page - start_page >= 4096) {
+        std::memset(g_regions_page_bits, 0xFF, sizeof g_regions_page_bits);
+        return;
+    }
+    for (uintptr_t pg = start_page; pg <= end_page; pg++) {
+        const uint32_t bit = uint32_t((pg ^ (pg >> 12)) & 4095);
+        g_regions_page_bits[bit >> 6] |= 1ull << (bit & 63);
+    }
+}
+
+inline bool may_overlap_written_pages(const uint8_t* p, uint64_t size) {
+    const uintptr_t start_page = reinterpret_cast<uintptr_t>(p) >> 16;
+    const uintptr_t end_page = (reinterpret_cast<uintptr_t>(p) + size - 1) >> 16;
+    if (start_page == end_page) {
+        const uint32_t bit = uint32_t((start_page ^ (start_page >> 12)) & 4095);
+        return (g_regions_page_bits[bit >> 6] >> (bit & 63)) & 1;
+    }
+    if (end_page - start_page > 16) return true;
+    for (uintptr_t pg = start_page; pg <= end_page; pg++) {
+        const uint32_t bit = uint32_t((pg ^ (pg >> 12)) & 4095);
+        if ((g_regions_page_bits[bit >> 6] >> (bit & 63)) & 1) return true;
+    }
+    return false;
+}
 std::vector<std::shared_ptr<std::vector<uint8_t>>> g_before_pool;
 bool g_read = false;  // a copy was bound for reading since the last write_after_read
 uint64_t g_binds = 0;  // written_bind calls, ever (nvn_frames.cpp: did a dispatch write storage after the split)
@@ -90,7 +120,9 @@ std::shared_ptr<std::vector<uint8_t>> alloc_before(uint64_t n) {
 // The regions overlapping [p, p + size), in address order.
 std::vector<It> overlapping(const uint8_t* p, uint64_t size) {
     std::vector<It> v;
-    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo) return v;
+    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo ||
+        !may_overlap_written_pages(p, size))
+        return v;
     It it = g_regions.upper_bound(p);
     if (it != g_regions.begin() && std::prev(it)->first + std::prev(it)->second.size > p) v.push_back(std::prev(it));
     for (; it != g_regions.end() && it->first < p + size; ++it) v.push_back(it);
@@ -235,12 +267,14 @@ Upload written_bind(VkCommandBuffer cb, const uint8_t* p, uint64_t size, uint64_
     dedup_invalidate(lo, n);  // copies of these bytes made earlier in the submit are not what later work reads
     g_regions_lo = std::min(g_regions_lo, lo);
     g_regions_hi = std::max(g_regions_hi, lo + n);
+    mark_written_pages(lo, n);
     It it = g_regions.emplace(lo, r).first;
     return at(it, off);
 }
 
 bool written_read(VkCommandBuffer cb, const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align, Upload& out) {
-    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo || written_separate())
+    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo || written_separate() ||
+        !may_overlap_written_pages(p, size))
         return false;
     // Fast path for single-region containment without heap-allocating std::vector<It>:
     It upper = g_regions.upper_bound(p);
@@ -286,7 +320,9 @@ Upload read_upload(VkCommandBuffer cb, const uint8_t* p, uint64_t size, uint64_t
 }
 
 bool written_overlaps(const uint8_t* p, uint64_t size) {
-    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo) return false;
+    if (!p || !size || g_regions.empty() || p >= g_regions_hi || p + size <= g_regions_lo ||
+        !may_overlap_written_pages(p, size))
+        return false;
     It it = g_regions.upper_bound(p);
     if (it != g_regions.begin() && std::prev(it)->first + std::prev(it)->second.size > p) return true;
     return it != g_regions.end() && it->first < p + size;
@@ -308,16 +344,26 @@ struct StreamCacheEntry {
     Upload upload{};
 };
 static StreamCacheEntry s_stream_cache[16];
+static uint32_t s_stream_valid_mask = 0;
+static uint64_t s_stream_valid_gen = 0;
 
 void stream_cache_invalidate(const uint8_t* p, uint64_t size) {
-    if (!p || !size) return;
+    if (!p || !size || !s_stream_valid_mask) return;
+    if (s_stream_valid_gen != dedup_generation()) {
+        s_stream_valid_mask = 0;
+        return;
+    }
     const uint8_t* p_end = p + size;
-    for (uint32_t s = 0; s < 15; s++) {
+    uint32_t m = s_stream_valid_mask;
+    while (m) {
+        const uint32_t s = uint32_t(__builtin_ctz(m));
+        m &= m - 1;
         if (s_stream_cache[s].host_p &&
             p < s_stream_cache[s].host_p + s_stream_cache[s].size &&
             s_stream_cache[s].host_p < p_end) {
             s_stream_cache[s].address = 0;
             s_stream_cache[s].host_p = nullptr;
+            s_stream_valid_mask &= ~(1u << s);
         }
     }
 }
@@ -342,6 +388,10 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
     }
 
     const uint64_t cur_gen = dedup_generation();
+    if (s_stream_valid_gen != cur_gen) {
+        s_stream_valid_gen = cur_gen;
+        s_stream_valid_mask = 0;
+    }
 
     for (uint32_t m = in.used; m; m &= m - 1) {
         const uint32_t s = uint32_t(__builtin_ctz(m));
@@ -358,6 +408,7 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
         in.vertex[s] = read_upload(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, 16), 16);
         g_upload_kind = kUploadOther;
         s_stream_cache[s] = {r.address, p, r.size, cur_gen, in.vertex[s]};
+        if (p) s_stream_valid_mask |= (1u << s);
     }
     if (!indexed) return true;
     uint32_t count = uint32_t(c.i[0]);
@@ -457,6 +508,7 @@ void written_reset() {
     g_read = false;
     g_regions_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
     g_regions_hi = nullptr;
+    std::memset(g_regions_page_bits, 0, sizeof g_regions_page_bits);
 }
 
 void written_log() {
