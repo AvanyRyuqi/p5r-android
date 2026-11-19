@@ -1792,7 +1792,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             }
         }
     }
-    const bool uw_frag_wide = g_uw_wide;
+    const bool uw_frag_wide = g_uw_wide && uw_fs_uses_fragcoord(fs);
     static const bool s_diag_stats_on = std::getenv("NX_RESTART_STATS") != nullptr || std::getenv("NX_FRAME_DRAWS") != nullptr;
     const bool allow_fast_pipe = !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
     const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^

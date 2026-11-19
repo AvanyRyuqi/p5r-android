@@ -260,7 +260,9 @@ void uw_cameras(uint64_t present) {
                         (unsigned long long)(a - kModuleBase), double(bits_to_f32(w[-3])),
                         double(bits_to_f32(w[-2])), double(bits_to_f32(w[-1])), w[1], w[2], w[5]);
                 }
-                *p = wide_bits;
+                uint32_t expected = asp_bits;
+                __atomic_compare_exchange_n(reinterpret_cast<uint32_t*>(a), &expected, wide_bits, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
                 ++it;
             } else {
                 it = g_cams.erase(it);
@@ -431,7 +433,33 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
 namespace {
 std::mutex g_fc_lock;
 std::set<const ShaderInfo*> g_fc_fs;
+std::map<const ShaderInfo*, bool> g_fc_uses_cache;
 }  // namespace
+
+bool uw_fs_uses_fragcoord(const ShaderInfo* fs) {
+    static const bool off = std::getenv("NX_UW_FRAGCOORD") && std::getenv("NX_UW_FRAGCOORD")[0] == '0';
+    if (off || !fs || fs->stage != ShaderStage::Fragment) return false;
+    {
+        std::lock_guard lk(g_fc_lock);
+        if (auto it = g_fc_uses_cache.find(fs); it != g_fc_uses_cache.end()) return it->second;
+    }
+    constexpr uint32_t BuiltInFragCoord = 15;
+    bool uses = false;
+    const auto& in = fs->spirv;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        const uint32_t op = in[i] & 0xffff;
+        if (!len || i + len > in.size()) break;
+        if (op == OpFunction) break;
+        if (op == OpDecorate && len >= 4 && in[i + 2] == DecorationBuiltIn && in[i + 3] == BuiltInFragCoord) {
+            uses = true;
+            break;
+        }
+        i += len;
+    }
+    std::lock_guard lk(g_fc_lock);
+    return g_fc_uses_cache[fs] = uses;
+}
 
 void uw_mark_fs_fragcoord(const ShaderInfo* fs) {
     if (!fs) return;
