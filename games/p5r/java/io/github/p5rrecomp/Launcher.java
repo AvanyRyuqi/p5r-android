@@ -22,6 +22,7 @@ import android.provider.Settings;
 import android.system.Os;
 import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -98,6 +99,7 @@ public class Launcher extends Activity {
     private LinearLayout foregroundRoot;
     private final P5Views.NavTabView[] navTabs = new P5Views.NavTabView[TAB_COUNT];
     private final View[] tabPanels = new View[TAB_COUNT];
+    private final LinearLayout[] tabLists = new LinearLayout[TAB_COUNT];
     private int activeTab = TAB_PLAY;
 
     // Hybrid PLAY buttons: heroPlay shown on TAB_PLAY, pinnedPlay shown on Settings tabs
@@ -120,6 +122,8 @@ public class Launcher extends Activity {
     private TextView keysSub;
     private TextView driverSub;
     private TextView wpSub;
+    private View wpDimRow;
+    private P5Views.SegmentedControl wpDimSeg;
 
     private Bitmap currentWallpaperBmp;
 
@@ -309,7 +313,16 @@ public class Launcher extends Activity {
 
     boolean hasCustomWallpaper() { return wallpaperFile().length() > 0; }
 
+    int wallpaperDim() { return Math.max(0, Math.min(2, prefs().getInt("wp_dim", 1))); }
+
+    void setWallpaperDim(int level) {
+        int clamped = Math.max(0, Math.min(2, level));
+        prefs().edit().putInt("wp_dim", clamped).apply();
+        if (bgView != null) bgView.setWallpaperDim(clamped);
+    }
+
     void loadWallpaper() {
+        if (bgView != null) bgView.setWallpaperDim(wallpaperDim());
         File f = wallpaperFile();
         if (!f.canRead()) {
             if (currentWallpaperBmp != null) {
@@ -374,6 +387,15 @@ public class Launcher extends Activity {
             wpSub.setText(custom
                     ? t("Imagen personalizada activa", "Custom image active")
                     : t("Fondo por defecto", "Default Wallpaper"));
+        }
+        if (wpDimRow != null) {
+            float alpha = custom ? 1.0f : 0.36f;
+            wpDimRow.setTag(alpha);
+            wpDimRow.setAlpha(alpha);
+        }
+        if (wpDimSeg != null) {
+            wpDimSeg.setEnabled(custom);
+            wpDimSeg.setSelectedIndex(wallpaperDim());
         }
     }
 
@@ -756,12 +778,13 @@ public class Launcher extends Activity {
         ppLp.rightMargin = dp(18);
         rail.addView(pinnedPlay, ppLp);
 
-        // Compact bottom readiness stamp
+        // Compact bottom version / alert stamp
         railStatusText = new TextView(this);
         railStatusText.setTypeface(P5Theme.monoBold());
         railStatusText.setTextSize(10.5f);
         railStatusText.setTextColor(P5Theme.MUTED_TEXT);
         railStatusText.setSingleLine(true);
+        railStatusText.setEllipsize(android.text.TextUtils.TruncateAt.END);
         railStatusText.setPadding(dp(6), dp(5), dp(14), 0);
         rail.addView(railStatusText);
 
@@ -855,6 +878,8 @@ public class Launcher extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setClipToPadding(false);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));
@@ -862,6 +887,7 @@ public class Launcher extends Activity {
         for (Option o : options) {
             if (o.tab == tab) addOptionRow(list, o);
         }
+        tabLists[tab] = list;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -881,6 +907,8 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));
@@ -903,6 +931,7 @@ public class Launcher extends Activity {
         for (Option o : options) {
             if (o.tab == TAB_CONTROLS) addOptionRow(list, o);
         }
+        tabLists[TAB_CONTROLS] = list;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -922,6 +951,8 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));
@@ -1006,6 +1037,40 @@ public class Launcher extends Activity {
                     public void onClick(View v) { resetLauncherWallpaper(); }
                 }, false);
 
+        // Wallpaper Dim control (active when a custom wallpaper image is applied)
+        P5Views.AngledRowLayout dimRow = new P5Views.AngledRowLayout(this);
+        LinearLayout dimTextCol = new LinearLayout(this);
+        dimTextCol.setOrientation(LinearLayout.VERTICAL);
+        dimTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView dimTitle = new TextView(this);
+        dimTitle.setText(t("Oscurecer fondo personalizado", "Wallpaper Dim"));
+        dimTitle.setTypeface(P5Theme.condensedBold());
+        dimTitle.setTextSize(15.5f);
+        dimTitle.setTextColor(P5Theme.PAPER_WHITE);
+        dimTextCol.addView(dimTitle);
+        TextView dimDesc = new TextView(this);
+        dimDesc.setText(t("Ajusta el contraste sobre tu imagen de fondo",
+                "Controls overlay darkness over your custom wallpaper"));
+        dimDesc.setTypeface(P5Theme.bodyRegular());
+        dimDesc.setTextSize(11.5f);
+        dimDesc.setTextColor(P5Theme.MUTED_TEXT);
+        dimTextCol.addView(dimDesc);
+        dimRow.addView(dimTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] dimLabels = new String[] {
+            t("SUAVE", "LIGHT"), t("MEDIO", "MED"), t("OSCURO", "DARK")
+        };
+        wpDimSeg = new P5Views.SegmentedControl(this, dimLabels, wallpaperDim(), false,
+                new P5Views.SegmentedControl.OnPickListener() {
+                    @Override
+                    public void onPick(int index) { setWallpaperDim(index); }
+                });
+        dimRow.addView(wpDimSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        wpDimRow = dimRow;
+        LinearLayout.LayoutParams dimLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        dimLp.bottomMargin = dp(6);
+        list.addView(dimRow, dimLp);
+
         addActionRow(list,
                 t("Acceso directo con icono propio", "Custom Home Shortcut Icon"),
                 t("Crea un acceso directo en tu pantalla de inicio con tu imagen",
@@ -1026,6 +1091,7 @@ public class Launcher extends Activity {
                     public void onClick(View v) { exportLogs(); }
                 }, null, null, false);
 
+        tabLists[TAB_FILES] = list;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1148,13 +1214,52 @@ public class Launcher extends Activity {
     private void selectTab(int idx, boolean animate) {
         if (animate && idx == activeTab) return;
         activeTab = idx;
+        if (animate && foregroundRoot != null) {
+            foregroundRoot.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        }
         for (int i = 0; i < TAB_COUNT; i++) {
             navTabs[i].setActive(i == idx, animate);
             boolean show = (i == idx);
             View panel = tabPanels[i];
             if (show) {
                 panel.setVisibility(View.VISIBLE);
-                if (animate) {
+                LinearLayout list = tabLists[i];
+                if (animate && list != null) {
+                    panel.animate().cancel();
+                    panel.setAlpha(1f);
+                    panel.setTranslationX(0f);
+                    // Crisp slide-in on the section header
+                    if (panel instanceof ViewGroup && ((ViewGroup) panel).getChildCount() > 0) {
+                        View hdr = ((ViewGroup) panel).getChildAt(0);
+                        hdr.animate().cancel();
+                        hdr.setAlpha(0f);
+                        hdr.setTranslationX(dp(14));
+                        hdr.animate().alpha(1f).translationX(0f)
+                                .setDuration(140).setInterpolator(new DecelerateInterpolator()).start();
+                    }
+                    // Staggered kinetic entrance for first 8 settings rows (preserves disabled alpha)
+                    int count = list.getChildCount();
+                    int limit = Math.min(8, count);
+                    for (int r = 0; r < count; r++) {
+                        View row = list.getChildAt(r);
+                        row.animate().cancel();
+                        Object tag = row.getTag();
+                        float targetAlpha = (tag instanceof Float) ? (Float) tag : 1.0f;
+                        if (r < limit) {
+                            row.setAlpha(0f);
+                            row.setTranslationX(dp(22));
+                            row.animate().alpha(targetAlpha).translationX(0f)
+                                    .setStartDelay(r * 22L)
+                                    .setDuration(155)
+                                    .setInterpolator(new DecelerateInterpolator())
+                                    .start();
+                        } else {
+                            row.setAlpha(targetAlpha);
+                            row.setTranslationX(0f);
+                        }
+                    }
+                } else if (animate) {
+                    panel.animate().cancel();
                     panel.setAlpha(0f);
                     panel.setTranslationX(dp(18));
                     panel.animate().alpha(1f).translationX(0f)
@@ -1281,7 +1386,11 @@ public class Launcher extends Activity {
             else if ("NX_UW_STRETCH_UI".equals(o.key)) enabled = uwOn;
             else if ("NX_STRETCH".equals(o.key)) enabled = !uwOn;
 
-            if (o.rowView != null) o.rowView.setAlpha(enabled ? 1.0f : 0.36f);
+            if (o.rowView != null) {
+                float alpha = enabled ? 1.0f : 0.36f;
+                o.rowView.setTag(alpha);
+                o.rowView.setAlpha(alpha);
+            }
             if (o.segView != null) o.segView.setEnabled(enabled);
             if (o.modalBtn != null) o.modalBtn.setEnabled(enabled);
         }
@@ -1309,6 +1418,21 @@ public class Launcher extends Activity {
             boolean fsrOn = "1".equals(fsrOpt.values[fsrOpt.pick]);
             specExtra.setValue(fsrOn ? "ON" : "OFF", false);
         }
+    }
+
+    private String buildVersionStamp() {
+        try {
+            String ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            if (ver != null && !ver.isEmpty()) return "v" + ver;
+        } catch (Exception ignored) {
+        }
+        return "P5R";
+    }
+
+    private String cleanReadySummary() {
+        String drv = activeDriver();
+        String drvLabel = drv.isEmpty() ? t("Driver del sistema", "System Driver") : drv;
+        return "Persona 5 Royal 1.0.0 · " + drvLabel;
     }
 
     private void updateReadiness() {
@@ -1343,7 +1467,7 @@ public class Launcher extends Activity {
             playLabel = t("PREPARAR", "PREPARE GAME");
         } else if (gameUri() != null) {
             title = t("LISTO PARA JUGAR", "READY TO PLAY");
-            body = gameName();
+            body = cleanReadySummary();
             playLabel = t("JUGAR  ▶", "PLAY  ▶");
         } else if (!hasData()) {
             warn = true;
@@ -1359,9 +1483,7 @@ public class Launcher extends Activity {
             playLabel = t("REINTENTAR", "CHECK AGAIN");
         } else {
             title = t("LISTO PARA JUGAR", "READY TO PLAY");
-            String drv = activeDriver();
-            body = drv.isEmpty() ? dataDir().getPath()
-                    : (dataDir().getName() + " · " + drv);
+            body = cleanReadySummary();
             playLabel = t("JUGAR  ▶", "PLAY  ▶");
         }
 
@@ -1376,7 +1498,7 @@ public class Launcher extends Activity {
         heroStatusBody.setText(body);
 
         railStatusText.setTextColor(warn ? P5Theme.ACID_YELLOW : P5Theme.MUTED_TEXT);
-        railStatusText.setText(warn ? ("! " + title) : ("● " + title));
+        railStatusText.setText(warn ? ("! " + title) : buildVersionStamp());
 
         if (gameSub != null) {
             gameSub.setText(gameUri() != null ? gameName()
