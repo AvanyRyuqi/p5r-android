@@ -63,12 +63,8 @@ bool uw_widen_texture(Texture& t) {
     // Render targets (flags & 8), window textures (flags & 1), or uncompressed scene colour (flags == 0);
     // strictly exclude pitch-linear targets (t.stride != 0, e.g. P5R's 480x270 R32F CPU occlusion depth pyramid)
     // and plain packaged assets (flags == 4).
-    // Also exclude P5R's low-res HDR glare/DoF blur pyramid targets (<=480x270, fmt 0x3f/0x3d): their fragment
-    // shaders sample via guest 16:9 pixel coordinates, so widening them shifts the blurred halo left by 1/k
-    // (creating a faint transparent ghost on the 3D Title Menu). Leaving them native lets normalized [0,1] UVs align.
     if (!uw_on() || t.target != 1 || t.stride != 0 || ((t.flags & 4) && !(t.flags & 9)) || t.width < 16 || t.height < 9)
         return false;
-    if ((t.format == 0x3f || t.format == 0x3d) && t.width <= 480 && t.height <= 270) return false;
     double r = double(t.width) / double(t.height);
     if (std::fabs(r - k169) / k169 > 0.03) return false;
     static std::map<std::string, int> seen;  // each distinct widened shape once, for the study log
@@ -428,6 +424,113 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
         out.insert(out.end(), w, w + n.len);
     }
     if (!returns) return false;
+    out[3] = bound;
+    return true;
+}
+
+namespace {
+std::mutex g_fc_lock;
+std::set<const ShaderInfo*> g_fc_fs;
+}  // namespace
+
+void uw_mark_fs_fragcoord(const ShaderInfo* fs) {
+    if (!fs) return;
+    std::lock_guard lk(g_fc_lock);
+    g_fc_fs.insert(fs);
+}
+
+bool uw_fs_has_fragcoord(const ShaderInfo* fs) {
+    if (!fs) return false;
+    std::lock_guard lk(g_fc_lock);
+    return g_fc_fs.count(fs) != 0;
+}
+
+// ---- gl_FragCoord.x * spec constant 0 (fixes 16:9 pixel-width screen-space UVs on widened targets) -----------------
+bool patch_frag_coord_x(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    static const bool off = std::getenv("NX_UW_FRAGCOORD") && std::getenv("NX_UW_FRAGCOORD")[0] == '0';
+    if (off || in.size() < 5) return false;
+    constexpr uint32_t OpInBoundsAccessChain = 66, BuiltInFragCoord = 15, StorageInput = 1;
+    struct Inst { size_t at; uint32_t op, len; };
+    std::vector<Inst> insts;
+    insts.reserve(in.size() / 4);
+    for (size_t i = 5; i < in.size();) {
+        uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    uint32_t bound = in[3], f32 = 0, v4f = 0, fc_var = 0;
+    std::set<uint32_t> int_types, zero_consts, ptr_input_v4f;
+    size_t first_function = in.size(), first_type = in.size();
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (first_type == in.size() && !is_header_op(n.op)) first_type = n.at;
+        if (n.op == OpDecorate && n.len >= 4 && w[2] == DecorationBuiltIn && w[3] == BuiltInFragCoord)
+            fc_var = w[1];
+        else if (n.op == OpTypeFloat && n.len == 3 && w[2] == 32) f32 = w[1];
+        else if (n.op == OpTypeInt && n.len == 4 && w[2] == 32) int_types.insert(w[1]);
+        else if (n.op == OpTypeVector && n.len == 4 && f32 && w[2] == f32 && w[3] == 4) v4f = w[1];
+        else if (n.op == OpTypePointer && n.len == 4 && w[2] == StorageInput && v4f && w[3] == v4f)
+            ptr_input_v4f.insert(w[1]);
+        else if (n.op == OpConstant && n.len == 4 && int_types.count(w[1]) && w[3] == 0)
+            zero_consts.insert(w[2]);
+        else if (n.op == OpFunction && first_function == in.size())
+            first_function = n.at;
+    }
+    if (!fc_var || !f32 || !v4f || first_type == in.size() || first_function == in.size()) return false;
+    bool var_ok = false;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpVariable && n.len >= 4 && w[2] == fc_var && w[3] == StorageInput && ptr_input_v4f.count(w[1])) {
+            var_ok = true;
+            break;
+        }
+    }
+    if (!var_ok) return false;
+    uint32_t spec = bound++;
+    std::set<uint32_t> fc_x_ptrs;
+    int patched_loads = 0;
+    out.assign(in.begin(), in.begin() + 5);
+    out.reserve(in.size() + 64);
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.at == first_type)
+            out.insert(out.end(), {(4u << 16) | OpDecorate, spec, DecorationSpecId, 0u});
+        if (n.at == first_function)
+            out.insert(out.end(), {(4u << 16) | OpSpecConstant, f32, spec, 0x3f800000u});
+        if ((n.op == OpAccessChain || n.op == OpInBoundsAccessChain) && n.len == 5 &&
+            w[3] == fc_var && zero_consts.count(w[4])) {
+            fc_x_ptrs.insert(w[2]);
+            out.insert(out.end(), w, w + n.len);
+            continue;
+        }
+        if (n.op == OpLoad && n.len >= 4 && w[1] == v4f && w[3] == fc_var) {
+            const uint32_t res = w[2];
+            const uint32_t raw = bound++, x = bound++, m = bound++;
+            out.push_back(w[0]);
+            out.push_back(w[1]);
+            out.push_back(raw);
+            out.insert(out.end(), w + 3, w + n.len);
+            out.insert(out.end(), {(5u << 16) | OpCompositeExtract, f32, x, raw, 0});
+            out.insert(out.end(), {(5u << 16) | OpFMul, f32, m, x, spec});
+            out.insert(out.end(), {(6u << 16) | OpCompositeInsert, v4f, res, m, raw, 0});
+            patched_loads++;
+            continue;
+        }
+        if (n.op == OpLoad && n.len >= 4 && w[1] == f32 && fc_x_ptrs.count(w[3])) {
+            const uint32_t res = w[2];
+            const uint32_t raw = bound++;
+            out.push_back(w[0]);
+            out.push_back(w[1]);
+            out.push_back(raw);
+            out.insert(out.end(), w + 3, w + n.len);
+            out.insert(out.end(), {(5u << 16) | OpFMul, f32, res, raw, spec});
+            patched_loads++;
+            continue;
+        }
+        out.insert(out.end(), w, w + n.len);
+    }
+    if (!patched_loads) return false;
     out[3] = bound;
     return true;
 }

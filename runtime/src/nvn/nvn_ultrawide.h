@@ -30,5 +30,9 @@ bool uw_vs_scaled(const ShaderInfo* vs);  // does this vertex shader's x get sca
 bool uw_stretch_ui();                     // NX_UW_STRETCH_UI=1: stretch 2D UI full-width while keeping 3D Hor+
 // A copy of a vertex module whose gl_Position.x is multiplied by specialization constant 0 (default 1.0).
 bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+// A copy of a fragment module whose BuiltIn FragCoord.x is multiplied by specialization constant 0 (default 1.0).
+bool patch_frag_coord_x(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+void uw_mark_fs_fragcoord(const ShaderInfo* fs);
+bool uw_fs_has_fragcoord(const ShaderInfo* fs);
 
 }  // namespace nx::nvn

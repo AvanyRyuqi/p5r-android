@@ -1661,6 +1661,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         bool textures_empty = false;
         bool ui_draw = false;
         bool uw_scaled = false;
+        bool uw_frag_wide = false;
     };
     static constexpr size_t kPipeFastBuckets = 256;
     static constexpr int kPipeFastWays = 4;
@@ -1791,10 +1792,12 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             }
         }
     }
+    const bool uw_frag_wide = g_uw_wide;
     static const bool s_diag_stats_on = std::getenv("NX_RESTART_STATS") != nullptr || std::getenv("NX_FRAME_DRAWS") != nullptr;
     const bool allow_fast_pipe = !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
     const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^
-                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode) &
+                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode ^
+                               (uint64_t(uw_frag_wide) << 1)) &
                               (kPipeFastBuckets - 1));
     if (allow_fast_pipe) {
         PipeMru* ways = s_pipe_mru[pf_bucket];
@@ -1811,7 +1814,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.layout == layout.layout &&
                 e.textures_empty == tex_empty &&
                 e.ui_draw == ui_draw &&
-                e.uw_scaled == uw_scaled) {
+                e.uw_scaled == uw_scaled &&
+                e.uw_frag_wide == uw_frag_wide) {
                 pipeline = e.pipeline;
                 g_draw_prof.pipe_fast_hits++;
                 if (w > 0) {
@@ -1853,6 +1857,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             if (lt && lt->format == 0x25 && (lt->flags & 8)) uw_ui_vertex_shader(vs);
         }
         if (uw_scaled) key.uw_x = 1.0f / uw_factor();
+        if (uw_frag_wide) key.uw_frag_x = 1.0f / uw_factor();
         if (uw_on() && __builtin_expect(s_uw_trace.active, 0)) {  // NX_UW_TRACE=<first draw>:<count>: draws (wide = a widened target)
             if (g_stats.total >= s_uw_trace.from && g_stats.total < s_uw_trace.from + s_uw_trace.count) {
                 GpuImage* wi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : nullptr;
@@ -1929,7 +1934,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             PipeMru* ways = s_pipe_mru[pf_bucket];
             for (int j = kPipeFastWays - 1; j > 0; j--) ways[j] = ways[j - 1];
             ways[0] = {vs, fs, s_cached_formats_hash, s_cached_pipe_hash_lo, s_cached_pipe_hash_hi,
-                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw, uw_scaled};
+                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw, uw_scaled, uw_frag_wide};
         }
     }
     const uint64_t t_after_pipe = draw_fast_ticks();
