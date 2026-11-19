@@ -209,9 +209,12 @@ void uw_cameras(uint64_t present) {
     if (!uw_on()) return;
     static const bool off = std::getenv("NX_UW_CAMERA") && std::getenv("NX_UW_CAMERA")[0] == '0';
     if (off) return;
+    static const bool bss_on = !(std::getenv("NX_UW_CAM_BSS") && std::getenv("NX_UW_CAM_BSS")[0] == '0');
+    static const bool heap_on = !(std::getenv("NX_UW_CAM_HEAP") && std::getenv("NX_UW_CAM_HEAP")[0] == '0');
     static std::once_flag once;
     std::call_once(once, [] {
-        cam_scan_bss();
+        if (bss_on) cam_scan_bss();
+        if (!heap_on) return;
         std::thread([] {
             plat::set_thread_name("uw-camscan");
 #if defined(__ANDROID__)
@@ -240,6 +243,7 @@ void uw_cameras(uint64_t present) {
     float wide = float(16.0 / 9.0) * uw_factor();
     uint32_t wide_bits;
     std::memcpy(&wide_bits, &wide, 4);
+    static std::set<uint64_t> logged;
     std::lock_guard lk(g_cam_lock);
     for (auto it = g_cams.begin(); it != g_cams.end();) {
         const uint64_t a = *it;
@@ -250,6 +254,12 @@ void uw_cameras(uint64_t present) {
             const bool valid = (w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w) ||
                                (a < kHeapBase);
             if (valid) {
+                if (logged.size() < 64 && logged.insert(a).second) {
+                    log("nvn: ultrawide: patch %s %llx (main+%llx) near=%g far=%g fov=%g w1=%x w2=%x w5=%x",
+                        a < kHeapBase ? "bss" : "heap", (unsigned long long)a,
+                        (unsigned long long)(a - kModuleBase), double(bits_to_f32(w[-3])),
+                        double(bits_to_f32(w[-2])), double(bits_to_f32(w[-1])), w[1], w[2], w[5]);
+                }
                 *p = wide_bits;
                 ++it;
             } else {
@@ -306,47 +316,14 @@ bool uw_vs_scaled(const ShaderInfo* vs) {
 }
 
 
-bool uw_hud_edge_on() {
-    static const bool on = [] {
-        if (!uw_on()) return false;
-        const char* e = std::getenv("NX_UW_HUD_EDGE");
-        return e && e[0] == '1';
-    }();
-    return on && (uw_hud_left_shift() != 0.0f || uw_hud_right_shift() != 0.0f);
-}
-
-float uw_hud_left_shift() {
-    static const float s = [] {
-        if (!uw_on()) return 0.0f;
-        const char* e = std::getenv("NX_UW_HUD_LEFT");
-        int pct = e && *e ? std::clamp(std::atoi(e), 0, 100) : 0;
-        if (pct <= 0) return 0.0f;
-        const float max_shift = 1.0f - (1.0f / uw_factor());
-        return -max_shift * (float(pct) / 100.0f);
-    }();
-    return s;
-}
-
-float uw_hud_right_shift() {
-    static const float s = [] {
-        if (!uw_on()) return 0.0f;
-        const char* e = std::getenv("NX_UW_HUD_RIGHT");
-        int pct = e && *e ? std::clamp(std::atoi(e), 0, 100) : 0;
-        if (pct <= 0) return 0.0f;
-        const float max_shift = 1.0f - (1.0f / uw_factor());
-        return max_shift * (float(pct) / 100.0f);
-    }();
-    return s;
-}
-
-// ---- gl_Position.x * spec0 + gl_Position.w * spec1 (modelled on patch_clip_z, nvn_spirv_clip.cpp) -------------------
+// ---- gl_Position.x * spec constant (modelled on patch_clip_z, nvn_spirv_clip.cpp) -----------------------------------
 
 namespace {
 enum : uint32_t {
     OpEntryPoint = 15, OpTypeInt = 21, OpTypeFloat = 22, OpTypeVector = 23, OpTypePointer = 32, OpSpecConstant = 50,
     OpFunction = 54, OpFunctionEnd = 56, OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
     OpDecorate = 71, OpMemberDecorate = 72, OpCompositeExtract = 81, OpCompositeInsert = 82, OpConstant = 43,
-    OpFAdd = 129, OpFMul = 133, OpReturn = 253, OpStructType = 30,
+    OpFMul = 133, OpReturn = 253, OpStructType = 30,
     DecorationBuiltIn = 11, DecorationSpecId = 1, BuiltInPosition = 0, StorageOutput = 3, ModelVertex = 0,
 };
 bool is_header_op(uint32_t op) {  // before the types: capabilities .. annotations
@@ -404,7 +381,6 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
     }
     if (!var) return false;
     uint32_t spec = bound++;
-    uint32_t spec_off = bound++;
     std::vector<uint32_t> globals;
     if (!ptr_v4f) ptr_v4f = bound++, globals.insert(globals.end(), {(4u << 16) | OpTypePointer, ptr_v4f, StorageOutput, v4f});
     if (block) {
@@ -412,17 +388,13 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
         if (!zero) zero = bound++, globals.insert(globals.end(), {(4u << 16) | OpConstant, u32, zero, member});
     }
     globals.insert(globals.end(), {(4u << 16) | OpSpecConstant, f32, spec, 0x3f800000u});
-    globals.insert(globals.end(), {(4u << 16) | OpSpecConstant, f32, spec_off, 0x00000000u});
 
     out.assign(in.begin(), in.begin() + 5);
     uint32_t function = 0;
     int returns = 0;
     for (const Inst& n : insts) {
         const uint32_t* w = &in[n.at];
-        if (n.at == first_type) {
-            out.insert(out.end(), {(4u << 16) | OpDecorate, spec, DecorationSpecId, 0u});
-            out.insert(out.end(), {(4u << 16) | OpDecorate, spec_off, DecorationSpecId, 1u});
-        }
+        if (n.at == first_type) out.insert(out.end(), {(4u << 16) | OpDecorate, spec, DecorationSpecId, 0u});
         if (n.at == first_function) out.insert(out.end(), globals.begin(), globals.end());
         if (n.op == OpFunction) function = w[2];
         if (n.op == OpReturn && function == entry) {
@@ -431,14 +403,11 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
                 p = bound++;
                 out.insert(out.end(), {(5u << 16) | OpAccessChain, ptr_v4f, p, var, zero});
             }
-            uint32_t v = bound++, x = bound++, cw = bound++, m = bound++, d = bound++, s = bound++, r = bound++;
+            uint32_t v = bound++, x = bound++, m = bound++, r = bound++;
             out.insert(out.end(), {(4u << 16) | OpLoad, v4f, v, p});
             out.insert(out.end(), {(5u << 16) | OpCompositeExtract, f32, x, v, 0});
-            out.insert(out.end(), {(5u << 16) | OpCompositeExtract, f32, cw, v, 3});
             out.insert(out.end(), {(5u << 16) | OpFMul, f32, m, x, spec});
-            out.insert(out.end(), {(5u << 16) | OpFMul, f32, d, cw, spec_off});
-            out.insert(out.end(), {(5u << 16) | OpFAdd, f32, s, m, d});
-            out.insert(out.end(), {(6u << 16) | OpCompositeInsert, v4f, r, s, v, 0});
+            out.insert(out.end(), {(6u << 16) | OpCompositeInsert, v4f, r, m, v, 0});
             out.insert(out.end(), {(3u << 16) | OpStore, p, r});
             returns++;
         }

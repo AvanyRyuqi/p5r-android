@@ -12,11 +12,7 @@ import android.content.pm.ShortcutManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.DashPathEffect;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
@@ -98,99 +94,6 @@ public class Launcher extends Activity {
     final Map<String, String> config = new LinkedHashMap<>();
     TextView status;
     Button play;
-    HudPreviewView hudPreview;
-
-    // Visual indicator showing where left/right corner HUD elements sit on a 20:9 screen relative to the 16:9 zone & notch.
-    final class HudPreviewView extends View {
-        final Paint framePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint notchPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint leftHudPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint rightHudPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint centerHudPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final RectF rect = new RectF();
-        int leftPct = 0, rightPct = 0;
-        boolean active = false;
-
-        HudPreviewView(Context c) {
-            super(c);
-            framePaint.setColor(0xFF1A1A1E);
-            borderPaint.setColor(0xFF555560);
-            borderPaint.setStyle(Paint.Style.STROKE);
-            borderPaint.setStrokeWidth(dp(2));
-            guidePaint.setColor(0x66FFFFFF);
-            guidePaint.setStyle(Paint.Style.STROKE);
-            guidePaint.setStrokeWidth(dp(1));
-            guidePaint.setPathEffect(new DashPathEffect(new float[] {dp(4), dp(4)}, 0));
-            notchPaint.setColor(0xFF3A3A44);
-            leftHudPaint.setColor(0xFFE62B2B);
-            rightHudPaint.setColor(0xFFE62B2B);
-            centerHudPaint.setColor(0xFF44444E);
-            textPaint.setColor(Color.WHITE);
-            textPaint.setTextSize(dp(9));
-            textPaint.setTextAlign(Paint.Align.CENTER);
-            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
-        }
-
-        void setPreview(boolean on, int l, int r) {
-            active = on;
-            leftPct = l;
-            rightPct = r;
-            setAlpha(on ? 1.0f : 0.35f);
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float pad = dp(4);
-            float w = getWidth() - pad * 2;
-            float h = getHeight() - pad * 2;
-            if (w <= 0 || h <= 0) return;
-            rect.set(pad, pad, pad + w, pad + h);
-            canvas.drawRoundRect(rect, dp(10), dp(10), framePaint);
-            canvas.drawRoundRect(rect, dp(10), dp(10), borderPaint);
-
-            // 16:9 safe-zone dashed guides (10% and 90% on a 20:9 screen)
-            float gL = pad + w * 0.10f;
-            float gR = pad + w * 0.90f;
-            canvas.drawLine(gL, pad + dp(2), gL, pad + h - dp(2), guidePaint);
-            canvas.drawLine(gR, pad + dp(2), gR, pad + h - dp(2), guidePaint);
-
-            // Camera punch-hole / notch indicator on left edge
-            float nr = dp(3);
-            canvas.drawCircle(pad + dp(7), pad + h * 0.5f, nr, notchPaint);
-
-            // Left HUD badge (slides from 10% at 0% toward 0% at 100%)
-            float boxW = w * 0.14f;
-            float boxH = h * 0.28f;
-            float lFrac = active ? (leftPct / 100.0f) : 0.0f;
-            float rFrac = active ? (rightPct / 100.0f) : 0.0f;
-            float lx = gL - (w * 0.085f) * lFrac;
-            float ly = pad + dp(6);
-            rect.set(lx, ly, lx + boxW, ly + boxH);
-            canvas.drawRoundRect(rect, dp(3), dp(3), leftHudPaint);
-            canvas.drawText("DATE", rect.centerX(), rect.centerY() + dp(3), textPaint);
-
-            // Right HUD badge (slides from 90% at 0% toward 100% at 100%)
-            float rx = gR - boxW + (w * 0.085f) * rFrac;
-            rect.set(rx, ly, rx + boxW, ly + boxH);
-            canvas.drawRoundRect(rect, dp(3), dp(3), rightHudPaint);
-            canvas.drawText("MAP", rect.centerX(), rect.centerY() + dp(3), textPaint);
-
-            // Centered dialogue / menu bar (always centered in 16:9)
-            float cw = w * 0.44f;
-            float ch = h * 0.22f;
-            float cx = pad + (w - cw) * 0.5f;
-            float cy = pad + h - ch - dp(6);
-            rect.set(cx, cy, cx + cw, cy + ch);
-            canvas.drawRoundRect(rect, dp(3), dp(3), centerHudPaint);
-            canvas.drawText(active ? "HUD L:" + leftPct + "%  R:" + rightPct + "%" : "16:9 CENTERED HUD",
-                    rect.centerX(), rect.centerY() + dp(3), textPaint);
-        }
-    }
     static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4, PICK_ICON = 5, PREPARE = 6, PICK_CPK = 7, PICK_DRIVER = 8;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
@@ -427,18 +330,6 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada (más FOV horizontal)"},
                 new String[] {"Off", "On (extra horizontal FOV)"}, 0));
-        options.add(new Option("NX_UW_HUD_EDGE", "Esquinas de HUD editables (Hor+)", "Editable HUD corners (Hor+)",
-                new String[] {"0", "1"},
-                new String[] {"Desactivadas (16:9 centrado)", "Activadas"},
-                new String[] {"Off (centered 16:9)", "On"}, 0));
-        options.add(new Option("NX_UW_HUD_LEFT", "Borde izquierdo HUD (muesca)", "HUD Left edge (notch)",
-                new String[] {"0", "25", "50", "75", "100"},
-                new String[] {"0% (16:9)", "25%", "50% (muesca)", "75%", "100% (borde)"},
-                new String[] {"0% (16:9)", "25%", "50% (notch-safe)", "75%", "100% (edge)"}, 0));
-        options.add(new Option("NX_UW_HUD_RIGHT", "Borde derecho HUD (muesca)", "HUD Right edge (notch)",
-                new String[] {"0", "25", "50", "75", "100"},
-                new String[] {"0% (16:9)", "25%", "50% (muesca)", "75%", "100% (borde)"},
-                new String[] {"0% (16:9)", "25%", "50% (notch-safe)", "75%", "100% (edge)"}, 0));
         options.add(new Option("NX_FSR", "Superresolución (FSR 1.0)", "Super resolution (FSR 1.0)",
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
@@ -570,14 +461,6 @@ public class Launcher extends Activity {
             });
             value.setTag(o);
             root.addView(row);
-            if ("NX_UW_HUD_RIGHT".equals(o.key)) {
-                hudPreview = new HudPreviewView(this);
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(260), dp(72));
-                lp.gravity = Gravity.CENTER_HORIZONTAL;
-                lp.topMargin = dp(2);
-                lp.bottomMargin = dp(8);
-                root.addView(hudPreview, lp);
-            }
         }
 
         LinearLayout edit = new LinearLayout(this);
@@ -844,39 +727,10 @@ public class Launcher extends Activity {
                 if (b.getParent() instanceof View) {
                     ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
                 }
-            } else if ("NX_UW_HUD_EDGE".equals(o.key)) {
-                Option uw = findOption("NX_ULTRAWIDE");
-                boolean enabled = uw != null && "1".equals(uw.values[uw.pick]);
-                b.setEnabled(enabled);
-                b.setAlpha(enabled ? 1.0f : 0.4f);
-                if (b.getParent() instanceof View) {
-                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
-                }
-            } else if ("NX_UW_HUD_LEFT".equals(o.key) || "NX_UW_HUD_RIGHT".equals(o.key)) {
-                Option uw = findOption("NX_ULTRAWIDE");
-                Option edge = findOption("NX_UW_HUD_EDGE");
-                boolean enabled = uw != null && "1".equals(uw.values[uw.pick]) &&
-                        edge != null && "1".equals(edge.values[edge.pick]);
-                b.setEnabled(enabled);
-                b.setAlpha(enabled ? 1.0f : 0.4f);
-                if (b.getParent() instanceof View) {
-                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
-                }
             }
         } else if (v instanceof android.view.ViewGroup) {
             android.view.ViewGroup g = (android.view.ViewGroup) v;
             for (int k = 0; k < g.getChildCount(); k++) updateButtons(g.getChildAt(k));
-        }
-        if (hudPreview != null) {
-            Option uw = findOption("NX_ULTRAWIDE");
-            Option edge = findOption("NX_UW_HUD_EDGE");
-            Option lo = findOption("NX_UW_HUD_LEFT");
-            Option ro = findOption("NX_UW_HUD_RIGHT");
-            boolean on = uw != null && "1".equals(uw.values[uw.pick]) &&
-                    edge != null && "1".equals(edge.values[edge.pick]);
-            int lp = lo != null ? Integer.parseInt(lo.values[lo.pick]) : 0;
-            int rp = ro != null ? Integer.parseInt(ro.values[ro.pick]) : 0;
-            hudPreview.setPreview(on, lp, rp);
         }
     }
 

@@ -1660,7 +1660,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         bool indexed = false;
         bool textures_empty = false;
         bool ui_draw = false;
-        uint8_t uw_mode = 0;
+        bool uw_scaled = false;
     };
     static constexpr size_t kPipeFastBuckets = 256;
     static constexpr int kPipeFastWays = 4;
@@ -1732,9 +1732,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     if (uw_on() && s_uw_cam_patch && !g_uw_wide && s_cached_c0_is_bgra8_rt) {
         uw_ui_vertex_shader(vs);
     }
-    // uw_mode: 0 = full-width (no x squeeze), 1 = centered 16:9, 2 = left-anchored corner HUD, 3 = right-anchored corner HUD.
-    static uint64_t s_uw_backdrop_frame = UINT64_MAX;
-    uint8_t uw_mode = 0;
+    bool uw_scaled = false;
     if (g_uw_wide) {
         // NX_UW_UI=learn: only learned UI vertex shaders; default: screen-space UI (!depth_test) plus P5R 1280x720
         // RGBA8 UI / 3D-in-UI passes (live_ui_draw(tt), e.g. Joker's 3D bust in STATS and battle/menu portraits).
@@ -1748,65 +1746,45 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                     if (r.texture)
                         if (GpuImage* si = image_of(r.texture); si && si->uw) samples_wide = true;
             if (!samples_wide) {
-                uw_mode = 1;
-                auto read_xy_bounds = [&](float& min_x, float& max_x, float& min_y, float& max_y) -> bool {
-                    if (vcount < 3 || vcount > 64 || g_state.attribs.empty() || g_state.streams.empty()) return false;
-                    const VertexAttrib& va = g_state.attribs[0];
-                    const VkFormat vf = vk_vertex_format(va.format);
-                    if (vf != VK_FORMAT_R32G32_SFLOAT && vf != VK_FORMAT_R32G32B32_SFLOAT &&
-                        vf != VK_FORMAT_R32G32B32A32_SFLOAT)
-                        return false;
-                    if (va.stream >= g_state.streams.size() || va.stream >= 16) return false;
-                    const Range& vb = g_state.vertex_buffers[va.stream];
-                    const uint32_t stride = g_state.streams[va.stream].stride;
-                    const uint8_t* base = vb.address ? guest_bytes(vb.address) : nullptr;
-                    const uint8_t* ib = indexed ? guest_bytes(c.a[0]) : nullptr;
-                    const uint32_t isz = indexed ? index_size(c.mask) : 0;
-                    if (!base || (indexed && (!ib || !isz))) return false;
-                    min_x = 1e30f; max_x = -1e30f; min_y = 1e30f; max_y = -1e30f;
-                    for (uint64_t k = 0; k < vcount; k++) {
-                        uint32_t vi = 0;
-                        if (indexed) {
-                            std::memcpy(&vi, ib + k * isz, isz);
-                            vi = uint32_t(int32_t(vi) + c.i[1]);
-                        } else {
-                            vi = uint32_t(c.i[0] + int32_t(k));
-                        }
-                        const uint64_t off = uint64_t(vi) * stride + va.offset;
-                        if (off + 8 > vb.size) return false;
-                        float xy[2];
-                        std::memcpy(xy, base + off, 8);
-                        if (!std::isfinite(xy[0]) || !std::isfinite(xy[1])) return false;
-                        min_x = std::min(min_x, xy[0]), max_x = std::max(max_x, xy[0]);
-                        min_y = std::min(min_y, xy[1]), max_y = std::max(max_y, xy[1]);
-                    }
-                    return true;
-                };
-                const uint64_t cur_rf = replay_frame_id();
+                uw_scaled = true;
                 // Fullscreen untextured solid-color quads (fades, flashes, dim overlays, Phone IM & transition backdrops)
                 // stay full-width 20:9 so the 3D scene never peeks out on the sides.
-                if (tex_empty && (vcount == 4 || vcount == 6)) {
-                    float min_x, max_x, min_y, max_y;
-                    if (read_xy_bounds(min_x, max_x, min_y, max_y)) {
-                        const bool full_1080 = min_x <= 2.0f && max_x >= 1918.0f && min_y <= 2.0f && max_y >= 1078.0f;
-                        const bool full_720 = min_x <= 2.0f && max_x >= 1278.0f && min_y <= 2.0f && max_y >= 718.0f;
-                        const bool full_ndc = min_x <= -0.99f && max_x >= 0.99f && min_y <= -0.99f && max_y >= 0.99f;
-                        if (full_1080 || full_720 || full_ndc) {
-                            uw_mode = 0;
-                            s_uw_backdrop_frame = cur_rf;
-                        }
-                    }
-                }
-                // Optional independent left/right corner HUD edge anchoring (disabled by default; paused during menus
-                // that draw a fullscreen backdrop or depth-tested UI).
-                if (uw_mode == 1 && uw_hud_edge_on() && !g_state.depth.depth_test && s_uw_backdrop_frame != cur_rf &&
-                    vcount >= 3 && vcount <= 64) {
-                    float min_x, max_x, min_y, max_y;
-                    if (read_xy_bounds(min_x, max_x, min_y, max_y)) {
-                        if (min_x >= -64.0f && max_x <= 660.0f && uw_hud_left_shift() != 0.0f) {
-                            uw_mode = 2;
-                        } else if (min_x >= 1260.0f && max_x <= 1984.0f && uw_hud_right_shift() != 0.0f) {
-                            uw_mode = 3;
+                if (tex_empty && (vcount == 4 || vcount == 6) && !g_state.attribs.empty() && !g_state.streams.empty()) {
+                    const VertexAttrib& va = g_state.attribs[0];
+                    const VkFormat vf = vk_vertex_format(va.format);
+                    if ((vf == VK_FORMAT_R32G32_SFLOAT || vf == VK_FORMAT_R32G32B32_SFLOAT ||
+                         vf == VK_FORMAT_R32G32B32A32_SFLOAT) &&
+                        va.stream < g_state.streams.size() && va.stream < 16) {
+                        const Range& vb = g_state.vertex_buffers[va.stream];
+                        const uint32_t stride = g_state.streams[va.stream].stride;
+                        const uint8_t* base = vb.address ? guest_bytes(vb.address) : nullptr;
+                        const uint8_t* ib = indexed ? guest_bytes(c.a[0]) : nullptr;
+                        const uint32_t isz = indexed ? index_size(c.mask) : 0;
+                        if (base && (!indexed || (ib && isz))) {
+                            float min_x = 1e30f, max_x = -1e30f, min_y = 1e30f, max_y = -1e30f;
+                            bool ok = true;
+                            for (uint64_t k = 0; k < vcount; k++) {
+                                uint32_t vi = 0;
+                                if (indexed) {
+                                    std::memcpy(&vi, ib + k * isz, isz);
+                                    vi = uint32_t(int32_t(vi) + c.i[1]);
+                                } else {
+                                    vi = uint32_t(c.i[0] + int32_t(k));
+                                }
+                                const uint64_t off = uint64_t(vi) * stride + va.offset;
+                                if (off + 8 > vb.size) { ok = false; break; }
+                                float xy[2];
+                                std::memcpy(xy, base + off, 8);
+                                if (!std::isfinite(xy[0]) || !std::isfinite(xy[1])) { ok = false; break; }
+                                min_x = std::min(min_x, xy[0]), max_x = std::max(max_x, xy[0]);
+                                min_y = std::min(min_y, xy[1]), max_y = std::max(max_y, xy[1]);
+                            }
+                            if (ok) {
+                                const bool full_1080 = min_x <= 2.0f && max_x >= 1918.0f && min_y <= 2.0f && max_y >= 1078.0f;
+                                const bool full_720 = min_x <= 2.0f && max_x >= 1278.0f && min_y <= 2.0f && max_y >= 718.0f;
+                                const bool full_ndc = min_x <= -0.99f && max_x >= 0.99f && min_y <= -0.99f && max_y >= 0.99f;
+                                if (full_1080 || full_720 || full_ndc) uw_scaled = false;
+                            }
                         }
                     }
                 }
@@ -1816,8 +1794,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     static const bool s_diag_stats_on = std::getenv("NX_RESTART_STATS") != nullptr || std::getenv("NX_FRAME_DRAWS") != nullptr;
     const bool allow_fast_pipe = !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
     const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^
-                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode ^
-                               (uint64_t(uw_mode) << 2)) &
+                               (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode) &
                               (kPipeFastBuckets - 1));
     if (allow_fast_pipe) {
         PipeMru* ways = s_pipe_mru[pf_bucket];
@@ -1834,7 +1811,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.layout == layout.layout &&
                 e.textures_empty == tex_empty &&
                 e.ui_draw == ui_draw &&
-                e.uw_mode == uw_mode) {
+                e.uw_scaled == uw_scaled) {
                 pipeline = e.pipeline;
                 g_draw_prof.pipe_fast_hits++;
                 if (w > 0) {
@@ -1875,11 +1852,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             const Texture* lt = get<Texture>(t.colors[0]);
             if (lt && lt->format == 0x25 && (lt->flags & 8)) uw_ui_vertex_shader(vs);
         }
-        if (uw_mode != 0) {
-            key.uw_x = 1.0f / uw_factor();
-            if (uw_mode == 2) key.uw_x_off = uw_hud_left_shift();
-            else if (uw_mode == 3) key.uw_x_off = uw_hud_right_shift();
-        }
+        if (uw_scaled) key.uw_x = 1.0f / uw_factor();
         if (uw_on() && __builtin_expect(s_uw_trace.active, 0)) {  // NX_UW_TRACE=<first draw>:<count>: draws (wide = a widened target)
             if (g_stats.total >= s_uw_trace.from && g_stats.total < s_uw_trace.from + s_uw_trace.count) {
                 GpuImage* wi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : nullptr;
@@ -1956,7 +1929,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             PipeMru* ways = s_pipe_mru[pf_bucket];
             for (int j = kPipeFastWays - 1; j > 0; j--) ways[j] = ways[j - 1];
             ways[0] = {vs, fs, s_cached_formats_hash, s_cached_pipe_hash_lo, s_cached_pipe_hash_hi,
-                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw, uw_mode};
+                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw, uw_scaled};
         }
     }
     const uint64_t t_after_pipe = draw_fast_ticks();
