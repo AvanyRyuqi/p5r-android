@@ -133,6 +133,8 @@ struct ShaderReflection {
     std::vector<ShaderIo> inputs, outputs;         // Location-decorated Input/Output variables (not built-ins)
     std::vector<uint32_t> builtins_in, builtins_out;  // SPIR-V BuiltIn values (on variables or block members)
     bool uses_support_buffer = false;
+    bool uses_discard = false;  // OpKill / OpTerminateInvocation / OpDemoteToHelperInvocationEXT
+    uint32_t output_mask = 0;   // bit k: fragment shader writes Location k (k < 8)
 
     const DescriptorBinding* find(uint32_t set, uint32_t binding) const;
     // Vertex: the attribute locations the shader reads. Fragment: the render targets it writes.
@@ -236,6 +238,11 @@ struct ShaderInfo {
     // on use, as before.
     bool masks_known = false;
     uint64_t dynamic_uniforms = 0, written_storage = 0;
+    // Precomputed shader classification flags (set once at load time, zero per-draw string compares).
+    bool is_p5r_bloom_blur = false;
+    bool is_known_fullscreen_fs = false;
+    bool is_copy_fs = false;
+    bool is_passthrough_vs = false;
 };
 
 // Builds a ShaderInfo from a code block, its control section and the SPIR-V words (no I/O). `resources` = the
