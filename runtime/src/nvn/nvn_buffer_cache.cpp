@@ -430,9 +430,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
         }
 
         const uint64_t t0 = fast_ticks();
-        const bool can_sample =
-            (is_3d_geom && size > 512 && e.verified_streak >= 3) ||
-            (g_upload_kind == kUploadBlock && size > 4096 && e.verified_streak >= 8);
+        const bool can_sample = (is_3d_geom && size > 512 && e.verified_streak >= 3);
         bool match = false;
         if (can_sample) {
             uint64_t sh = fast_sample_hash(p, size);

@@ -1222,15 +1222,10 @@ void bind_sets(VkCommandBuffer cb, VkPipelineBindPoint point, const ProgramLayou
         b.cb = cb;
     }
     if (b.layout != layout.layout) {
-        // Vulkan pipeline layout compatibility (spec §14.2.2, zero push constants): sets [0..first_diff) remain
-        // validly bound when their VkDescriptorSetLayouts match identically.
-        uint32_t first_diff = 0;
-        while (first_diff < 4 && b.set_layouts[first_diff] == layout.sets[first_diff]) first_diff++;
         b.layout = layout.layout;
-        for (uint32_t k = 0; k < 4; k++) b.set_layouts[k] = layout.sets[k];
-        for (uint32_t k = first_diff; k < 4; k++) b.sets[k] = VK_NULL_HANDLE;
-        if (first_diff == 0) b.dynamic_count = 0;
-        if (first_diff <= 1) b.dynamic_ssbo_count = 0;
+        for (int k = 0; k < 4; k++) b.sets[k] = VK_NULL_HANDLE;
+        b.dynamic_count = 0;
+        b.dynamic_ssbo_count = 0;
     }
 
     bool need[4] = {};
