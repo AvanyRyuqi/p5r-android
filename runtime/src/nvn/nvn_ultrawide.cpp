@@ -168,8 +168,8 @@ void cam_scan_bss() {
     for (uint64_t a = lo + 12; a + 12 <= hi; a += 4) {
         const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
         if (w[0] != asp_bits) continue;
-        // Global display aspect {1280, 720, 1920, 16/9} or global GFD camera {near, far, fov, 16/9}
-        const bool is_disp = (w[-3] == 1280u && w[-2] == 720u && w[-1] == 1920u);
+        // Only patch true global GFD camera structs {near, far, fov, 16/9} — NEVER patch main+0x2327a8c
+        // ({1280, 720, 1920, 16/9}), which P5R's area-transition code (main+104e7d0) reads as its display struct.
         const float near_z = bits_to_f32(w[-3]);
         const float far_z = bits_to_f32(w[-2]);
         const float fov_deg = bits_to_f32(w[-1]);
@@ -177,7 +177,7 @@ void cam_scan_bss() {
                             near_z >= 0.05f && near_z <= 100.0f &&
                             far_z >= 200.0f && far_z <= 10000000.0f && far_z > near_z * 10.0f &&
                             fov_deg >= 1.0f && fov_deg <= 150.0f;
-        if (is_disp || is_cam) found.push_back(a);
+        if (is_cam) found.push_back(a);
     }
     std::lock_guard lk(g_cam_lock);
     for (uint64_t a : found)
@@ -236,14 +236,31 @@ void uw_cameras(uint64_t present) {
             }
         }).detach();
     });
-    const uint32_t asp_bits = 0x3fe38e39u;
+    constexpr uint32_t far_bits = 0x447a0000u, fov_bits = 0x3f490fdbu, asp_bits = 0x3fe38e39u;
     float wide = float(16.0 / 9.0) * uw_factor();
     uint32_t wide_bits;
     std::memcpy(&wide_bits, &wide, 4);
     std::lock_guard lk(g_cam_lock);
-    for (uint64_t a : g_cams) {
+    for (auto it = g_cams.begin(); it != g_cams.end();) {
+        const uint64_t a = *it;
         auto* p = reinterpret_cast<volatile uint32_t*>(a);
-        if (*p == asp_bits) *p = wide_bits;
+        const uint32_t cur = *p;
+        if (cur == asp_bits) {
+            const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
+            const bool valid = (w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w) ||
+                               (a < kHeapBase);
+            if (valid) {
+                *p = wide_bits;
+                ++it;
+            } else {
+                it = g_cams.erase(it);
+            }
+        } else if (cur == wide_bits) {
+            ++it;
+        } else {
+            // Freed/reused memory after an area transition: stop tracking it.
+            it = g_cams.erase(it);
+        }
     }
 }
 
