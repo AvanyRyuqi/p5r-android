@@ -177,10 +177,7 @@ Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t a
         }
     };
     Upload u;
-    static const bool cache_blocks = std::getenv("NX_CACHE_BLOCKS") != nullptr;
-    const bool allow_buf_cache = (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex) ||
-                                 (cache_blocks && g_upload_kind == kUploadBlock);
-    if (allow_buf_cache && cache_upload(p, size, padded, align, u)) {  // nvn_buffer_cache.cpp
+    if (g_upload_kind != kUploadOther && cache_upload(p, size, padded, align, u)) {  // nvn_buffer_cache.cpp
         record_entry(u);
         return u;
     }
