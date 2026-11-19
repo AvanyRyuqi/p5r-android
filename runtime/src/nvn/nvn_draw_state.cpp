@@ -17,6 +17,7 @@ uint32_t g_dynamic_state_version = 1;
 uint32_t g_attrib_state_version = 1;
 uint32_t g_tex_state_version = 1;
 uint32_t g_targets_version = 1;
+uint32_t g_uniform_state_version[kStages] = {1, 1, 1, 1, 1, 1};
 uint32_t g_storage_state_version[kStages] = {1, 1, 1, 1, 1, 1};
 }
 
@@ -99,7 +100,11 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
         }
         case Cmd::BindUniformBuffer:
             if (c.i[0] >= 0 && c.i[0] < kStages && c.i[1] >= 0 && c.i[1] < 18) {
-                s.uniforms[c.i[0]][c.i[1]] = {c.a[0], c.a[1]};
+                Range& dst = s.uniforms[c.i[0]][c.i[1]];
+                if (dst.address != c.a[0] || dst.size != c.a[1]) {
+                    dst = {c.a[0], c.a[1]};
+                    g_uniform_state_version[c.i[0]]++;
+                }
             }
             break;
         case Cmd::BindStorageBuffer:
@@ -132,7 +137,14 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                     uint64_t v0 = value(0);
                     if (s.images[st][slot] != v0) s.images[st][slot] = v0, g_tex_state_version++;
                 }
-                if (c.mask == 2 && slot >= 0 && slot < 18) s.uniforms[st][slot] = {value(0), value(1)};
+                if (c.mask == 2 && slot >= 0 && slot < 18) {
+                    uint64_t a0 = value(0), a1 = value(1);
+                    Range& dst = s.uniforms[st][slot];
+                    if (dst.address != a0 || dst.size != a1) {
+                        dst = {a0, a1};
+                        g_uniform_state_version[st]++;
+                    }
+                }
                 if (c.mask == 3 && slot >= 0 && slot < 16) {
                     uint64_t a0 = value(0), a1 = value(1);
                     Range& dst = s.storage[st][slot];

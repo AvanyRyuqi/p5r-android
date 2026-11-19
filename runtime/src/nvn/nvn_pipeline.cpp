@@ -472,7 +472,7 @@ Pool& pool() {
             std::thread([pl] {
                 t_worker = true;
                 plat::set_thread_name("pipe-worker");
-                plat::reset_current_thread_affinity("pipe-worker");
+                plat::pin_current_thread_to_little_cores("pipe-worker");
                 plat::set_thread_priority(0);
                 for (;;) {
                     std::shared_ptr<PipeTask> t;
@@ -741,7 +741,7 @@ void pipeline_warm_step() {
             if (!hashes.empty()) {
                 std::thread([hashes = std::move(hashes)] {
                     plat::set_thread_name("shader-prewarm");
-                    plat::reset_current_thread_affinity("shader-prewarm");
+                    plat::pin_current_thread_to_little_cores("shader-prewarm");
                     plat::set_thread_priority(8);
                     size_t loaded_cnt = 0;
                     for (const std::string& h : hashes) {

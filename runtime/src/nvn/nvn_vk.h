@@ -397,8 +397,14 @@ inline void occlusion_query_end(VkCommandBuffer cb, int32_t q) {
     if (q >= 0) occlusion_query_end_slow(cb, q);
 }
 // A conditional draw as an indirect draw counted by its object's query; false: not conditional, draw it as it is.
-bool occlusion_draw(VkCommandBuffer cb, bool indexed, uint32_t count, uint32_t instances, uint32_t first,
-                    int32_t vertex_offset, uint32_t first_instance);
+extern int32_t g_conditional_query;
+bool occlusion_draw_slow(VkCommandBuffer cb, bool indexed, uint32_t count, uint32_t instances, uint32_t first,
+                         int32_t vertex_offset, uint32_t first_instance);
+inline bool occlusion_draw(VkCommandBuffer cb, bool indexed, uint32_t count, uint32_t instances, uint32_t first,
+                           int32_t vertex_offset, uint32_t first_instance) {
+    if (__builtin_expect(g_conditional_query < 0, 1)) return false;
+    return occlusion_draw_slow(cb, indexed, count, instances, first, vertex_offset, first_instance);
+}
 void occlusion_log();
 
 // nvn_debug.cpp: NX_ZERO_DRAWS, shader pairs whose draws produce no pixel.

@@ -362,15 +362,20 @@ struct StreamCacheEntry {
     const uint8_t* host_p = nullptr;
     uint64_t size = 0;
     uint64_t gen = 0;
+    uint64_t frame_id = 0;
+    uint64_t evict_epoch = 0;
+    bool is_cached = false;
     Upload upload{};
 };
 static StreamCacheEntry s_stream_cache[16];
 static uint32_t s_stream_valid_mask = 0;
 static uint64_t s_stream_valid_gen = 0;
+static uint64_t s_stream_frame_id = 0;
+static uint64_t s_stream_evict_epoch = 0;
 static const uint8_t* s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
 static const uint8_t* s_stream_hi = nullptr;
 
-constexpr size_t kVertexCacheSlots = 256;
+constexpr size_t kVertexCacheSlots = 512;
 static StreamCacheEntry s_vertex_cache[kVertexCacheSlots];
 static uint64_t s_vertex_valid_words[kVertexCacheSlots / 64] = {};
 static uint32_t s_vertex_group_mask = 0;
@@ -383,7 +388,10 @@ inline uint64_t vertex_bloom_bit(const uint8_t* p) {
 
 void stream_cache_invalidate(const uint8_t* p, uint64_t size) {
     if (!p || !size || (!s_stream_valid_mask && !s_vertex_group_mask) || p >= s_stream_hi || p + size <= s_stream_lo) return;
-    if (s_stream_valid_gen != dedup_generation()) {
+    const uint64_t cur_frame_id = g_frame.load(std::memory_order_relaxed) + 1;
+    const uint64_t cur_evict_epoch = cache_evict_epoch();
+    if (s_stream_valid_gen != dedup_generation() &&
+        (s_stream_frame_id != cur_frame_id || s_stream_evict_epoch != cur_evict_epoch)) {
         s_stream_valid_mask = 0;
         if (s_vertex_group_mask) {
             std::memset(s_vertex_valid_words, 0, sizeof s_vertex_valid_words);
@@ -452,7 +460,11 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
     }
 
     const uint64_t cur_gen = dedup_generation();
-    if (s_stream_valid_gen != cur_gen) {
+    const uint64_t cur_frame_id = g_frame.load(std::memory_order_relaxed) + 1;
+    const uint64_t cur_evict_epoch = cache_evict_epoch();
+    if (s_stream_frame_id != cur_frame_id || s_stream_evict_epoch != cur_evict_epoch) {
+        s_stream_frame_id = cur_frame_id;
+        s_stream_evict_epoch = cur_evict_epoch;
         s_stream_valid_gen = cur_gen;
         s_stream_valid_mask = 0;
         if (s_vertex_group_mask) {
@@ -462,14 +474,21 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
         }
         s_stream_lo = reinterpret_cast<const uint8_t*>(UINTPTR_MAX);
         s_stream_hi = nullptr;
+    } else if (s_stream_valid_gen != cur_gen) {
+        s_stream_valid_gen = cur_gen;
     }
+
+    auto entry_valid = [&](const StreamCacheEntry& e) -> bool {
+        return e.gen == cur_gen ||
+               (e.is_cached && e.frame_id == cur_frame_id && e.evict_epoch == cur_evict_epoch);
+    };
 
     for (uint32_t m = in.used; m; m &= m - 1) {
         const uint32_t s = uint32_t(__builtin_ctz(m));
         const Range& r = g_state.vertex_buffers[s];
         if (r.address && r.address == s_stream_cache[s].address &&
             r.size == s_stream_cache[s].size &&
-            cur_gen == s_stream_cache[s].gen) {
+            entry_valid(s_stream_cache[s])) {
             in.vertex[s] = s_stream_cache[s].upload;
             continue;
         }
@@ -478,7 +497,7 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
             bool hit = false;
             for (size_t step = 0; step < 4; step++) {
                 const StreamCacheEntry& vc = s_vertex_cache[(vc_base + step) & (kVertexCacheSlots - 1)];
-                if (vc.address == r.address && vc.size == r.size && vc.gen == cur_gen) {
+                if (vc.address == r.address && vc.size == r.size && entry_valid(vc)) {
                     in.vertex[s] = vc.upload;
                     s_stream_cache[s] = vc;
                     if (vc.host_p) s_stream_valid_mask |= (1u << s);
@@ -493,7 +512,8 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
         g_upload_kind = kUploadVertex;
         in.vertex[s] = read_upload(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, 16), 16);
         g_upload_kind = kUploadOther;
-        s_stream_cache[s] = {r.address, p, r.size, cur_gen, in.vertex[s]};
+        const bool cached_buf = is_buffer_cache_buffer(in.vertex[s].buffer);
+        s_stream_cache[s] = {r.address, p, r.size, cur_gen, cur_frame_id, cur_evict_epoch, cached_buf, in.vertex[s]};
         if (p) {
             s_stream_valid_mask |= (1u << s);
             if (p < s_stream_lo) s_stream_lo = p;
@@ -502,7 +522,7 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
                 size_t put_idx = vc_base;
                 for (size_t step = 0; step < 4; step++) {
                     size_t cand = (vc_base + step) & (kVertexCacheSlots - 1);
-                    if (s_vertex_cache[cand].gen != cur_gen || s_vertex_cache[cand].address == 0) {
+                    if (!entry_valid(s_vertex_cache[cand]) || s_vertex_cache[cand].address == 0) {
                         put_idx = cand;
                         break;
                     }
