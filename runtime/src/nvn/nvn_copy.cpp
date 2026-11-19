@@ -14,6 +14,7 @@
 
 #include "nvn_draw_state.h"
 #include "nvn_pipeline.h"
+#include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 
 namespace nx::nvn {
@@ -132,6 +133,11 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     GpuImage* src = ensure_contents(cb, c.a[0]);
     GpuImage* dst = ensure_contents(cb, c.a[1]);
     if (!src || !dst) return;
+    uint32_t sl = std::min(info.src_view.base_level, src->levels - 1), dl = std::min(info.dst_view.base_level, dst->levels - 1);
+    // NX_ULTRAWIDE: guest queries nvnTextureGetWidth() and receives guest_width (16:9), so widen copy rects
+    // for widened targets before HUD/low_3d scaling (matching nvn_draw.cpp viewports/scissors and nvn_clears.cpp).
+    if (src->uw) uw_span(info.src[0], info.src[3], (src->hud || src->low_3d) ? UINT32_MAX : std::max(1u, src->width >> sl));
+    if (dst->uw) uw_span(info.dst[0], info.dst[3], (dst->hud || dst->low_3d) ? UINT32_MAX : std::max(1u, dst->width >> dl));
     // NX_HUD_1080: a rectangle on a 1920x1080 image of a 1280x720 texture is taken 3/2 (the frame's copy into the
     // window texture: both scaled, a plain copy; one side only: a blit that scales).
     auto hud_rect = [](int32_t* r) {
@@ -155,7 +161,6 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     bool same = src == dst;
     static const bool no_same = std::getenv("NX_COPY_NO_SAME_IMAGE") != nullptr;  // bisecting: the old way
     if (same && no_same) return;
-    uint32_t sl = std::min(info.src_view.base_level, src->levels - 1), dl = std::min(info.dst_view.base_level, dst->levels - 1);
     bool s3d = src->view_type == VK_IMAGE_VIEW_TYPE_3D, d3d = dst->view_type == VK_IMAGE_VIEW_TYPE_3D;
     auto sub = [](const GpuImage& img, uint32_t level, int32_t z, int32_t depth, uint32_t view_layer, bool is3d) {
         VkImageAspectFlags aspect = img.aspect;
@@ -262,6 +267,7 @@ void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list)
     if (!img) return;
     uint32_t level = std::min(info.view.base_level, img->levels - 1);
     uint32_t lw = std::max(1u, img->width >> level), lh = std::max(1u, img->height >> level);
+    if (img->uw) uw_span(info.region[0], info.region[3], (img->hud || img->low_3d) ? UINT32_MAX : lw);
     if (img->hud) {  // NX_HUD_1080: the guest rectangle, 3/2
         const int32_t x1 = hud_up_end(info.region[0] + info.region[3]), y1 = hud_up_end(info.region[1] + info.region[4]);
         info.region[0] = hud_up(info.region[0]), info.region[1] = hud_up(info.region[1]);
