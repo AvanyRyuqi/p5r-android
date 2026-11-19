@@ -326,6 +326,10 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
                 new String[] {"Off", "On"}, 0));
+        options.add(new Option("NX_ULTRAWIDE", "Pantalla ancha real (Hor+)", "True Widescreen (Hor+)",
+                new String[] {"0", "1"},
+                new String[] {"Desactivada", "Activada (más FOV horizontal)"},
+                new String[] {"Off", "On (extra horizontal FOV)"}, 0));
         options.add(new Option("NX_FSR", "Superresolución (FSR 1.0)", "Super resolution (FSR 1.0)",
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
@@ -909,6 +913,7 @@ public class Launcher extends Activity {
             config.put("NX_RES", "720p");
         }
         for (String k : new String[] {"RENDER_SCALE", "NX_ANISO_MAX", "NX_LOD_BIAS"}) config.remove(k);
+        if ("1".equals(config.get("NX_ULTRAWIDE"))) config.put("NX_STRETCH", "0");
         final String preset = config.get("GRAPHICS");
         if ("low".equals(preset)) config.put("NX_LOD_BIAS", "1");
         else if ("medium".equals(preset)) config.put("NX_LOD_BIAS", "0.5");

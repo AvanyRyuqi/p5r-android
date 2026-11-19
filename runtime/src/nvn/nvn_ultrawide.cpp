@@ -60,8 +60,11 @@ uint32_t uw_widen(uint32_t w) {
 }
 
 bool uw_widen_texture(Texture& t) {
-    // Render targets (flags 8), the window textures (display, 1) and the scene colour (flags 0); not packaged assets (4).
-    if (!uw_on() || t.target != 1 || (t.flags & 4) || t.width < 16 || t.height < 9) return false;
+    // Render targets (flags & 8), window textures (flags & 1), or uncompressed scene colour (flags == 0);
+    // strictly exclude pitch-linear targets (t.stride != 0, e.g. P5R's 480x270 R32F CPU occlusion depth pyramid)
+    // and plain packaged assets (flags == 4).
+    if (!uw_on() || t.target != 1 || t.stride != 0 || ((t.flags & 4) && !(t.flags & 9)) || t.width < 16 || t.height < 9)
+        return false;
     double r = double(t.width) / double(t.height);
     if (std::fabs(r - k169) / k169 > 0.03) return false;
     static std::map<std::string, int> seen;  // each distinct widened shape once, for the study log
@@ -128,22 +131,73 @@ void uw_scan(uint64_t present) {
 }
 
 // ---- camera aspect -----------------------------------------------------------------------------------------------
-// The game keeps its cameras as objects holding {.., far 1000.0, fovy 0.785398, aspect 16/9, ..} (measured with
-// NX_UW_SCAN: 40+ of them in a pool). The aspect is a plain float the game turns into the projection, so setting it
-// to k * 16/9 gives the Hor+ camera (same vertical field of view, wider horizontal). Found by scanning the heap for
-// the three floats in a row (rescanned every 2 s, a worker thread), rewritten at every present.
+// Supports both:
+//   - P5R's GFD camera structs ({near, far, fov_deg, 16/9, ...}) and global display/camera aspect in main's data/bss
+//   - Mario Wonder's {1000.0, 0.785398, 16/9} camera pool
+// Setting the 16/9 aspect float to k * 16/9 gives a true Hor+ camera (same vertical FOV, wider horizontal FOV + frustum).
 namespace {
 std::mutex g_cam_lock;
 std::vector<uint64_t> g_cams;  // addresses of the aspect floats
 
-void cam_scan() {
-    const uint32_t far_bits = 0x447a0000u, fov_bits = 0x3f490fdbu, asp_bits = 0x3fe38e39u;
-    uint64_t lo = kHeapBase, hi = kHeapBase + heap_size();
+inline float bits_to_f32(uint32_t u) {
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+
+inline bool is_p5r_gfd_cam(const uint32_t* w) {
+    // w[0] == 16/9 (0x3fe38e39), w[-3] = near, w[-2] = far, w[-1] = fov_deg
+    const float near_z = bits_to_f32(w[-3]);
+    const float far_z = bits_to_f32(w[-2]);
+    const float fov_deg = bits_to_f32(w[-1]);
+    if (!std::isfinite(near_z) || !std::isfinite(far_z) || !std::isfinite(fov_deg)) return false;
+    if (near_z < 0.05f || near_z > 100.0f) return false;
+    if (far_z < 200.0f || far_z > 10000000.0f || far_z <= near_z * 10.0f) return false;
+    if (fov_deg < 1.0f || fov_deg > 150.0f) return false;
+    return w[2] == 1u || w[5] == 1u;
+}
+
+void cam_scan_bss() {
+    const LoadedModule* m = module_at(kModuleBase);
+    if (!m || !m->info) return;
+    const ModuleInfo* mi = m->info;
+    const uint64_t lo = mi->base + mi->data;
+    const uint64_t hi = mi->base + mi->bss + mi->bss_size;
+    constexpr uint32_t asp_bits = 0x3fe38e39u;
     std::vector<uint64_t> found;
-    for (uint64_t a = lo; a + 12 <= hi; a += 4) {
+    for (uint64_t a = lo + 12; a + 12 <= hi; a += 4) {
         const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
-        if (w[0] != far_bits) continue;
-        if (w[1] == fov_bits && (w[2] == asp_bits)) found.push_back(a + 8);
+        if (w[0] != asp_bits) continue;
+        // Global display aspect {1280, 720, 1920, 16/9} or global GFD camera {near, far, fov, 16/9}
+        const bool is_disp = (w[-3] == 1280u && w[-2] == 720u && w[-1] == 1920u);
+        const float near_z = bits_to_f32(w[-3]);
+        const float far_z = bits_to_f32(w[-2]);
+        const float fov_deg = bits_to_f32(w[-1]);
+        const bool is_cam = std::isfinite(near_z) && std::isfinite(far_z) && std::isfinite(fov_deg) &&
+                            near_z >= 0.05f && near_z <= 100.0f &&
+                            far_z >= 200.0f && far_z <= 10000000.0f && far_z > near_z * 10.0f &&
+                            fov_deg >= 1.0f && fov_deg <= 150.0f;
+        if (is_disp || is_cam) found.push_back(a);
+    }
+    std::lock_guard lk(g_cam_lock);
+    for (uint64_t a : found)
+        if (std::find(g_cams.begin(), g_cams.end(), a) == g_cams.end() && g_cams.size() < 8192) g_cams.push_back(a);
+}
+
+void cam_scan() {
+    constexpr uint32_t far_bits = 0x447a0000u, fov_bits = 0x3f490fdbu, asp_bits = 0x3fe38e39u;
+    const uint64_t lo = (kHeapBase + 16) & ~7ull;
+    const uint64_t hi = (kHeapBase + heap_size() - 24) & ~7ull;
+    if (lo >= hi) return;
+    std::vector<uint64_t> found;
+    auto check_addr = [&](uint64_t a) {
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
+        if ((w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w)) found.push_back(a);
+    };
+    for (uint64_t a = lo; a < hi; a += 8) {
+        const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
+        if (uint32_t(v) == asp_bits) check_addr(a);
+        if (uint32_t(v >> 32) == asp_bits) check_addr(a + 4);
     }
     std::lock_guard lk(g_cam_lock);
     for (uint64_t a : found)
@@ -157,17 +211,28 @@ void uw_cameras(uint64_t present) {
     if (off) return;
     static std::once_flag once;
     std::call_once(once, [] {
+        cam_scan_bss();
         std::thread([] {
             plat::set_thread_name("uw-camscan");
+#if defined(__ANDROID__)
+            plat::pin_current_thread_to_little_cores("uw-camscan");
+#endif
+            plat::set_thread_priority(10);
+            int scans = 0;
             for (;;) {
                 uint64_t t0 = plat::monotonic_ns();
                 cam_scan();
-                static int logged = 0;
-                if (logged++ < 5) {
+                size_t count = 0;
+                {
                     std::lock_guard lk(g_cam_lock);
-                    log("nvn: ultrawide: camera scan %.0f ms, %zu cameras", double(plat::monotonic_ns() - t0) / 1e6, g_cams.size());
+                    count = g_cams.size();
                 }
-                plat::sleep_ns(2'000'000'000ll);
+                if (scans < 5) {
+                    log("nvn: ultrawide: camera scan %.0f ms, %zu cameras",
+                        double(plat::monotonic_ns() - t0) / 1e6, count);
+                }
+                scans++;
+                plat::sleep_ns((scans <= 3 || count == 0) ? 2'000'000'000ll : 5'000'000'000ll);
             }
         }).detach();
     });
@@ -186,10 +251,14 @@ bool g_uw_wide = false;
 
 void uw_span(int32_t& x, int32_t& w, uint32_t extent_w) {
     int64_t x0 = std::llround(double(x) * uw_factor());
-    int64_t ww = int64_t(uw_widen(uint32_t(std::max(0, w))));
-    if (std::llabs(int64_t(extent_w) - ww) <= 2 && x == 0) ww = extent_w;  // the whole target
-    if (x0 + ww > int64_t(extent_w)) ww = std::max<int64_t>(0, int64_t(extent_w) - x0);
-    x = int32_t(x0), w = int32_t(ww);
+    // Guard against INT32_MAX / huge scissors so uw_widen() never overflows signed int32_t when extent_w == UINT32_MAX.
+    int64_t ww = (w >= 0x3fffffff) ? int64_t(0x3fffffff) : int64_t(uw_widen(uint32_t(std::max(0, w))));
+    if (extent_w != UINT32_MAX) {
+        if (std::llabs(int64_t(extent_w) - ww) <= 2 && x == 0) ww = extent_w;  // the whole target
+        if (x0 + ww > int64_t(extent_w)) ww = std::max<int64_t>(0, int64_t(extent_w) - x0);
+    }
+    x = int32_t(std::clamp<int64_t>(x0, INT32_MIN, 0x3fffffff));
+    w = int32_t(std::clamp<int64_t>(ww, 0, 0x3fffffff));
 }
 
 namespace {
