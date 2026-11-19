@@ -21,7 +21,9 @@ import android.view.animation.DecelerateInterpolator;
 /**
  * Full-bleed Direction A (Calling Card / Pause Menu) multi-layer vector background:
  * - Default Wallpaper: live 4-plane depth parallax reacting to phone gyro/gravity,
- *   slow ambient diagonal crimson ribbons, and subtle inner-star breathing (Approach B).
+ *   tapered multi-angle opposing crimson ribbons with tab-switch kinetic surges,
+ *   45-degree crimson-ink Ben-Day halftones clipped inside the ribbons, and
+ *   subtle inner-star breathing (Approach B).
  * - Custom Wallpaper: completely static (sensors & frame loop automatically disabled).
  */
 final class P5BackgroundView extends View implements SensorEventListener, Choreographer.FrameCallback {
@@ -41,7 +43,10 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
     private final Path slashPath = new Path();
 
     // Pre-built default wallpaper vector geometry (zero allocation in onDraw)
-    private final Path ribbonPath = new Path();
+    private final Path ribbonStratum1Path = new Path();
+    private final Path ribbonStratum2Path = new Path();
+    private final Path ribbonAccentPath = new Path();
+    private final Path ribbonClipPath = new Path();
     private final Path starOuterPath = new Path();
     private final Path starMidRedPath = new Path();
     private final Path starInnerCorePath = new Path();
@@ -70,6 +75,8 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
 
     private long lastFrameNanos = 0L;
     private float animTime = 0f;
+    private float ribbonBoostVel = 0f;
+    private float ribbonKickDist = 0f;
 
     P5BackgroundView(Context context) {
         super(context);
@@ -154,6 +161,12 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
         if (dt > 0.05f) dt = 0.05f;
 
         animTime += dt;
+        if (ribbonBoostVel > 0.001f) {
+            ribbonKickDist += ribbonBoostVel * dt;
+            ribbonBoostVel *= (float) Math.exp(-5.5f * dt);
+        } else {
+            ribbonBoostVel = 0f;
+        }
         // Critically damped smooth spring tracking toward gyro tilt
         float k = 1f - (float) Math.exp(-8.5f * dt);
         smoothTiltX += (targetTiltX - smoothTiltX) * k;
@@ -271,6 +284,7 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
     }
 
     void triggerSlash() {
+        ribbonBoostVel = Math.min(1.6f, ribbonBoostVel + 1.0f);
         if (slashAnim != null) slashAnim.cancel();
         slashProgress = 0f;
         slashAnim = ValueAnimator.ofFloat(0f, 1f);
@@ -369,8 +383,8 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
         topWedgePath.lineTo(w, h * 0.28f);
         topWedgePath.close();
 
-        // Pre-render transparent Ben-Day halftone dots once (oversized by pad for parallax travel)
-        halftonePad = 24f * d;
+        // Pre-render 45-degree crimson-ink Ben-Day halftone screen once (clipped inside ribbons at draw time)
+        halftonePad = 12f * d;
         int padPx = Math.round(halftonePad);
         int bw = w + padPx * 2;
         int bh = h + padPx * 2;
@@ -378,20 +392,27 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
         Canvas c = new Canvas(cachedHalftone);
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
-        p.setColor(P5Theme.INK_BLACK);
+        p.setColor(android.graphics.Color.argb(132, 36, 2, 8));
 
-        float step = 11f * d;
-        for (float y = -halftonePad + step * 0.5f; y < h + halftonePad; y += step) {
-            for (float x = w * 0.22f; x < w + halftonePad; x += step) {
-                float normX = (x - w * 0.26f) / (w * 0.74f);
-                float normY = y / h;
-                float edgeFactor = Math.max(0f, 1f - normX * 2.2f) * 0.7f;
-                float cornerFactor = Math.max(0f, (normX + normY - 1.15f) * 1.3f);
-                float intensity = Math.min(1f, Math.max(edgeFactor, cornerFactor));
-                if (intensity > 0.12f) {
-                    float radius = intensity * 3.1f * d;
-                    c.drawCircle(x + halftonePad, y + halftonePad, radius, p);
-                }
+        float step = 9.5f * d;
+        float invSqrt2 = 0.70710678f;
+        float diag = (float) Math.hypot(bw, bh);
+        float originX = bw * 0.5f;
+        float originY = bh * 0.5f;
+        float minX = w * 0.16f;
+        for (float u = -diag * 0.65f; u <= diag * 0.65f; u += step) {
+            for (float v = -diag * 0.65f; v <= diag * 0.65f; v += step) {
+                float sx = originX + (u - v) * invSqrt2;
+                float sy = originY + (u + v) * invSqrt2;
+                if (sx < minX || sx > bw + step || sy < -step || sy > bh + step) continue;
+                float normX = (sx - halftonePad - w * 0.24f) / (w * 0.76f);
+                float normY = (sy - halftonePad) / h;
+                // Slightly bolder print grain near the diagonal seam and bottom-right, finer in center
+                float edgeGrad = Math.max(0f, 1f - normX * 1.45f) * 0.75f;
+                float cornerGrad = Math.max(0f, (normX + normY - 0.95f) * 0.95f);
+                float intensity = Math.min(1f, Math.max(0.38f, Math.max(edgeGrad, cornerGrad)));
+                float radius = intensity * 2.85f * d;
+                c.drawCircle(sx, sy, radius, p);
             }
         }
     }
@@ -411,14 +432,20 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
         p.close();
     }
 
-    private void drawSlantedRibbon(Canvas c, float topLeftX, float width, float tiltDx, float h) {
-        ribbonPath.reset();
-        ribbonPath.moveTo(topLeftX, -20f);
-        ribbonPath.lineTo(topLeftX + width, -20f);
-        ribbonPath.lineTo(topLeftX + width - tiltDx, h + 20f);
-        ribbonPath.lineTo(topLeftX - tiltDx, h + 20f);
-        ribbonPath.close();
-        c.drawPath(ribbonPath, paint);
+    private static float posMod(float v, float m) {
+        float r = v % m;
+        return (r < 0f) ? (r + m) : r;
+    }
+
+    private static void addTaperedRibbon(Path target, float topLeftX, float topWidth,
+                                         float bottomWidth, float tiltDx, float h) {
+        float over = 24f;
+        float bottomLeftX = topLeftX - tiltDx;
+        target.moveTo(topLeftX, -over);
+        target.lineTo(topLeftX + topWidth, -over);
+        target.lineTo(bottomLeftX + bottomWidth, h + over);
+        target.lineTo(bottomLeftX, h + over);
+        target.close();
     }
 
     private void drawDefaultDynamicWallpaper(Canvas canvas, int w, int h) {
@@ -428,30 +455,64 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
         float gx = smoothTiltX * gyroScale;
         float gy = smoothTiltY * gyroScale;
 
-        // 1. Deepest Layer: P5 Crimson ground + slow ambient drifting deep-crimson speed ribbons
+        // 1. Deepest Layer: P5 Crimson ground + tapered multi-angle opposing cut-paper ribbons
         canvas.drawColor(P5Theme.P5_CRIMSON_BG);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(P5Theme.P5_DEEP_RED);
 
-        // Seamless horizontal-diagonal ribbon cycle across the right stage (calm ~16s loop)
-        float period = w * 0.56f;
-        float drift = ((animTime * (period / 16f)) % period);
-        float ribGyroX = gx * 8f * d;
-        float tiltDx = w * 0.17f;
-        float startX = w * 0.16f + drift + ribGyroX;
+        // Stratum 1: Wide slow-drifting tapered slabs (rightward, ~23s non-harmonic loop, bold 38-deg slant)
+        ribbonStratum1Path.reset();
+        float period1 = w * 0.88f;
+        float drift1 = posMod(animTime * (period1 / 23f) + ribbonKickDist * (w * 0.22f), period1);
+        float tilt1 = w * 0.34f;
+        float start1 = w * 0.12f + drift1 + gx * 6f * d;
         for (int k = -1; k <= 2; k++) {
-            float base = startX + k * period;
-            drawSlantedRibbon(canvas, base, w * 0.22f, tiltDx, h);
-            drawSlantedRibbon(canvas, base + w * 0.34f, w * 0.11f, tiltDx, h);
+            float base = start1 + k * period1;
+            addTaperedRibbon(ribbonStratum1Path, base, w * 0.24f, w * 0.15f, tilt1, h);
+            addTaperedRibbon(ribbonStratum1Path, base + w * 0.50f, w * 0.085f, w * 0.145f, tilt1 * 0.88f, h);
+        }
+        paint.setColor(P5Theme.P5_DEEP_RED);
+        canvas.drawPath(ribbonStratum1Path, paint);
+
+        // Stratum 2: Counter-drifting darker oxblood tapered shard (leftward, ~17s loop, steeper angle)
+        ribbonStratum2Path.reset();
+        float period2 = w * 0.94f;
+        float drift2 = posMod(-(animTime * (period2 / 17f) + ribbonKickDist * (w * 0.28f)), period2);
+        float tilt2 = w * 0.24f;
+        float start2 = w * 0.22f + drift2 + gx * 9f * d;
+        for (int k = -1; k <= 2; k++) {
+            float base = start2 + k * period2;
+            addTaperedRibbon(ribbonStratum2Path, base, w * 0.135f, w * 0.065f, tilt2, h);
+        }
+        paint.setColor(android.graphics.Color.rgb(122, 0, 12));
+        canvas.drawPath(ribbonStratum2Path, paint);
+
+        // 2. Screen-Tone Halftones: 45-degree crimson-ink Ben-Day dots clipped strictly inside the ribbons
+        // Anchored to the paper plane (minimal 3dp gyro) so ribbons reveal the print texture as they glide
+        if (cachedHalftone != null && !cachedHalftone.isRecycled()) {
+            ribbonClipPath.reset();
+            ribbonClipPath.addPath(ribbonStratum1Path);
+            ribbonClipPath.addPath(ribbonStratum2Path);
+            canvas.save();
+            canvas.clipPath(ribbonClipPath);
+            canvas.drawBitmap(cachedHalftone,
+                    -halftonePad + gx * 3f * d,
+                    -halftonePad + gy * 3f * d,
+                    null);
+            canvas.restore();
         }
 
-        // 2. Mid-Back Layer: Comic Ben-Day halftone dots (single GPU blit, shifts across ribbons)
-        if (cachedHalftone != null && !cachedHalftone.isRecycled()) {
-            canvas.drawBitmap(cachedHalftone,
-                    -halftonePad + gx * 13f * d,
-                    -halftonePad + gy * 13f * d,
-                    null);
+        // Stratum 3: Thin opposing ink-black accent slash (~11s loop, aggressive slant)
+        ribbonAccentPath.reset();
+        float period3 = w * 1.18f;
+        float drift3 = posMod(-(animTime * (period3 / 11f) + ribbonKickDist * (w * 0.42f)), period3);
+        float tilt3 = w * 0.44f;
+        float start3 = w * 0.30f + drift3 + gx * 11f * d;
+        for (int k = -1; k <= 2; k++) {
+            float base = start3 + k * period3;
+            addTaperedRibbon(ribbonAccentPath, base, w * 0.032f, w * 0.011f, tilt3, h);
         }
+        paint.setColor(android.graphics.Color.argb(110, 10, 10, 12));
+        canvas.drawPath(ribbonAccentPath, paint);
 
         // 3. Hero Layer: Stacked 3D Cut-Paper P5 Star Emblem (Approach B)
         // Outer star stays anchored when phone is still; inner crimson star has subtle slow life
