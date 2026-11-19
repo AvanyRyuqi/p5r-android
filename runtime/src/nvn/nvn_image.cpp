@@ -111,12 +111,14 @@ int low_3d_mode() {
         if (const char* e = std::getenv("NX_LOW_3D"); e && e[0] != '\0') {
             if (e[0] == '0') return 0;
             if (e[0] == '2' || std::strstr(e, "360")) return 2;  // 2/3 (640x360)
+            if (e[0] == '3' || std::strstr(e, "540")) return 3;  // 5/6 (800x450)
             return 1;                                            // 3/4 (720x405)
         }
         for (const char* k : {"NX_RES", "NX_RENDER_RES", "RESOLUTION", "resolution"}) {
             if (const char* r = std::getenv(k); r && r[0]) {
                 if (std::strncmp(r, "360", 3) == 0) return 2;
                 if (std::strncmp(r, "480", 3) == 0) return 1;
+                if (std::strncmp(r, "540", 3) == 0) return 3;
             }
         }
         std::string cfg = plat::setting("NX_RES");
@@ -124,6 +126,7 @@ int low_3d_mode() {
         if (cfg.empty()) cfg = plat::setting("resolution");
         if (cfg == "360p" || cfg == "360") return 2;
         if (cfg == "480p" || cfg == "480") return 1;
+        if (cfg == "540p" || cfg == "540") return 3;
         return 0;
     }();
     return m;
@@ -131,8 +134,14 @@ int low_3d_mode() {
 }  // namespace
 
 bool low_3d_on() { return low_3d_mode() > 0; }
-int32_t low_3d_num() { return low_3d_mode() == 2 ? 2 : 3; }
-int32_t low_3d_den() { return low_3d_mode() == 2 ? 3 : 4; }
+int32_t low_3d_num() {
+    const int m = low_3d_mode();
+    return m == 2 ? 2 : m == 3 ? 5 : 3;
+}
+int32_t low_3d_den() {
+    const int m = low_3d_mode();
+    return m == 2 ? 3 : m == 3 ? 6 : 4;
+}
 
 bool low_3d_texture(const Texture& t) {
     if (!low_3d_on() || t.stride) return false;
