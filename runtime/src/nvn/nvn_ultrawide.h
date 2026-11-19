@@ -27,6 +27,7 @@ void uw_scan(uint64_t present);        // NX_UW_SCAN debug
 void uw_ui_vertex_shader(const ShaderInfo* vs);  // learned: drew into a UI layer target
 bool uw_is_ui_vertex_shader(const ShaderInfo* vs);
 bool uw_vs_scaled(const ShaderInfo* vs);  // does this vertex shader's x get scaled by 1/k (world and UI geometry)
+bool uw_stretch_ui();                     // NX_UW_STRETCH_UI=1: stretch 2D UI full-width while keeping 3D Hor+
 // A copy of a vertex module whose gl_Position.x is multiplied by specialization constant 0 (default 1.0).
 bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 

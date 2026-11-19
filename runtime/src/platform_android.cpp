@@ -1409,6 +1409,7 @@ extern "C" void android_main(android_app* app) {
     {
         unsetenv("NX_STRETCH");
         unsetenv("NX_ULTRAWIDE");
+        unsetenv("NX_UW_STRETCH_UI");
         std::ifstream f(g_root + "/config.txt");
         std::string line;
         while (std::getline(f, line)) {

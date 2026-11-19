@@ -1728,7 +1728,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         uw_ui_vertex_shader(vs);
     }
     bool uw_scaled = false;
-    if (g_uw_wide) {
+    if (g_uw_wide && (!s_uw_cam_patch || !uw_stretch_ui())) {
         // NX_UW_UI=learn: only learned UI vertex shaders; default: screen-space UI (!depth_test) plus P5R 1280x720
         // RGBA8 UI / 3D-in-UI passes (live_ui_draw(tt), e.g. Joker's 3D bust in STATS and battle/menu portraits).
         const bool ui_pick = !s_uw_cam_patch ||

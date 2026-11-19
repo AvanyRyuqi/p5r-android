@@ -63,8 +63,12 @@ bool uw_widen_texture(Texture& t) {
     // Render targets (flags & 8), window textures (flags & 1), or uncompressed scene colour (flags == 0);
     // strictly exclude pitch-linear targets (t.stride != 0, e.g. P5R's 480x270 R32F CPU occlusion depth pyramid)
     // and plain packaged assets (flags == 4).
+    // Also exclude P5R's low-res HDR glare/DoF blur pyramid targets (<=480x270, fmt 0x3f/0x3d): their fragment
+    // shaders sample via guest 16:9 pixel coordinates, so widening them shifts the blurred halo left by 1/k
+    // (creating a faint transparent ghost on the 3D Title Menu). Leaving them native lets normalized [0,1] UVs align.
     if (!uw_on() || t.target != 1 || t.stride != 0 || ((t.flags & 4) && !(t.flags & 9)) || t.width < 16 || t.height < 9)
         return false;
+    if ((t.format == 0x3f || t.format == 0x3d) && t.width <= 480 && t.height <= 270) return false;
     double r = double(t.width) / double(t.height);
     if (std::fabs(r - k169) / k169 > 0.03) return false;
     static std::map<std::string, int> seen;  // each distinct widened shape once, for the study log
@@ -315,6 +319,15 @@ bool uw_vs_scaled(const ShaderInfo* vs) {
     return cache[vs] = scaled;
 }
 
+
+bool uw_stretch_ui() {
+    static const bool on = [] {
+        if (!uw_on()) return false;
+        const char* e = std::getenv("NX_UW_STRETCH_UI");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
 
 // ---- gl_Position.x * spec constant (modelled on patch_clip_z, nvn_spirv_clip.cpp) -----------------------------------
 

@@ -330,6 +330,10 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada (más FOV horizontal)"},
                 new String[] {"Off", "On (extra horizontal FOV)"}, 0));
+        options.add(new Option("NX_UW_STRETCH_UI", "UI pantalla completa (Hor+)", "Full-width UI (Hor+)",
+                new String[] {"0", "1"},
+                new String[] {"Centrada 16:9", "Estirada (Recomendado)"},
+                new String[] {"Centered 16:9", "Full-width (Recommended)"}, 1));
         options.add(new Option("NX_FSR", "Superresolución (FSR 1.0)", "Super resolution (FSR 1.0)",
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
@@ -722,6 +726,14 @@ public class Launcher extends Activity {
             if ("NX_MALI_LOW_SHADOWS".equals(o.key)) {
                 Option shadows = findOption("NX_SHADOWS");
                 boolean enabled = shadows != null && "1".equals(shadows.values[shadows.pick]);
+                b.setEnabled(enabled);
+                b.setAlpha(enabled ? 1.0f : 0.4f);
+                if (b.getParent() instanceof View) {
+                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
+                }
+            } else if ("NX_UW_STRETCH_UI".equals(o.key)) {
+                Option uw = findOption("NX_ULTRAWIDE");
+                boolean enabled = uw != null && "1".equals(uw.values[uw.pick]);
                 b.setEnabled(enabled);
                 b.setAlpha(enabled ? 1.0f : 0.4f);
                 if (b.getParent() instanceof View) {
