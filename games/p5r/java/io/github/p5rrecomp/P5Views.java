@@ -9,6 +9,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.drawable.ColorDrawable;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
@@ -287,6 +288,7 @@ final class P5Views {
                 pressed = true;
                 setScaleX(0.96f);
                 setScaleY(0.96f);
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
                 invalidate();
             } else if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
                 pressed = false;
@@ -437,11 +439,13 @@ final class P5Views {
                     idx = Math.max(0, Math.min(labels.length - 1, idx));
                     if (idx != selected) {
                         selected = idx;
+                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                         invalidate();
                         if (listener != null) listener.onPick(idx);
                     } else if (labels.length == 2) {
                         // Tapping the already-active side of a 2-option toggle flips it cleanly
                         selected = 1 - selected;
+                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                         invalidate();
                         if (listener != null) listener.onPick(selected);
                     }
@@ -699,7 +703,195 @@ final class P5Views {
         }
     }
 
-    // ---- 8. Custom P5 Modal Picker Dialog (Replaces stock Android AlertDialog for lists) ----
+    // ---- 8. Slanted Cut-Paper Progress Bar (for ImportActivity) ----
+
+    static final class SlashProgressBar extends View {
+        private int max = 1000;
+        private int progress = 0;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path trackPath = new Path();
+        private final Path fillPath = new Path();
+        private final Path edgePath = new Path();
+        private final Path badgePath = new Path();
+
+        SlashProgressBar(Context context) {
+            super(context);
+            textPaint.setTypeface(P5Theme.monoBold());
+            textPaint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        void setMax(int max) {
+            this.max = Math.max(1, max);
+            invalidate();
+        }
+
+        void setProgress(int progress) {
+            this.progress = Math.max(0, Math.min(max, progress));
+            invalidate();
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            int w = MeasureSpec.getSize(wSpec);
+            int h = P5Theme.dpx(getContext(), 34);
+            setMeasuredDimension(w, h);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = P5Theme.dp(getContext(), 1f);
+            float w = getWidth(), h = getHeight();
+            float skew = 9f * d;
+            float sh = 3f * d;
+            float badgeW = 64f * d;
+            float gap = 8f * d;
+            float trackL = 2f * d;
+            float trackT = 2f * d;
+            float trackR = Math.max(trackL + 40f * d, w - badgeW - gap - sh);
+            float trackB = h - sh - 2f * d;
+
+            // Track hard shadow
+            P5Theme.setSlantedQuad(trackPath, trackL + sh, trackT + sh, trackR + sh, trackB + sh, skew, skew);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(trackPath, paint);
+
+            // Track base fill
+            P5Theme.setSlantedQuad(trackPath, trackL, trackT, trackR, trackB, skew, skew);
+            paint.setColor(P5Theme.INK_ELEVATED);
+            c.drawPath(trackPath, paint);
+
+            // Crimson progress fill clipped cleanly inside the slanted track
+            float frac = Math.max(0f, Math.min(1f, (float) progress / max));
+            if (frac > 0.001f) {
+                float usableW = (trackR - trackL) - skew;
+                float fillRight = trackL + skew + usableW * frac;
+                c.save();
+                c.clipPath(trackPath);
+                P5Theme.setSlantedQuad(fillPath, trackL - skew, trackT, fillRight, trackB, skew, skew);
+                paint.setColor(P5Theme.P5_RED);
+                c.drawPath(fillPath, paint);
+
+                // Sharp white diagonal leading slash edge while in progress
+                if (frac < 0.995f) {
+                    edgePath.reset();
+                    edgePath.moveTo(fillRight - 4f * d, trackT);
+                    edgePath.lineTo(fillRight, trackT);
+                    edgePath.lineTo(fillRight - skew, trackB);
+                    edgePath.lineTo(fillRight - skew - 4f * d, trackB);
+                    edgePath.close();
+                    paint.setColor(P5Theme.PAPER_WHITE);
+                    c.drawPath(edgePath, paint);
+                }
+                c.restore();
+            }
+
+            // Crisp track outline
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2f * d);
+            paint.setColor(P5Theme.PAPER_WHITE);
+            c.drawPath(trackPath, paint);
+
+            // Right-side slanted percentage readout badge
+            float bL = trackR + gap - skew * 0.35f;
+            float bR = w - sh - 2f * d;
+            P5Theme.setSlantedQuad(badgePath, bL + sh, trackT + sh, bR + sh, trackB + sh, skew * 0.7f, skew * 0.7f);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(badgePath, paint);
+
+            P5Theme.setSlantedQuad(badgePath, bL, trackT, bR, trackB, skew * 0.7f, skew * 0.7f);
+            paint.setColor(frac >= 0.999f ? P5Theme.PAPER_WHITE : P5Theme.INK_BLACK);
+            c.drawPath(badgePath, paint);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.8f * d);
+            paint.setColor(frac >= 0.999f ? P5Theme.P5_RED : P5Theme.PAPER_WHITE);
+            c.drawPath(badgePath, paint);
+
+            int pct = Math.round(frac * 100f);
+            textPaint.setTextSize(13f * d);
+            textPaint.setColor(frac >= 0.999f ? P5Theme.INK_BLACK : P5Theme.ACID_YELLOW);
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float base = (trackT + trackB) * 0.5f - (fm.ascent + fm.descent) * 0.5f;
+            c.drawText(pct + "%", (bL + bR) * 0.5f, base, textPaint);
+        }
+    }
+
+    // ---- 9. Calling-Card Skewed Dialog Frame (Hard offset crimson shadow + cut paper polygon) ----
+
+    static final class DialogFrameLayout extends LinearLayout {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path shadowPoly = new Path();
+        private final Path bodyPoly = new Path();
+        private final Path accentBar = new Path();
+
+        DialogFrameLayout(Context context) {
+            super(context);
+            setWillNotDraw(false);
+            setOrientation(VERTICAL);
+            setClipChildren(false);
+            setClipToPadding(false);
+            int padL = P5Theme.dpx(context, 22);
+            int padT = P5Theme.dpx(context, 20);
+            int padR = P5Theme.dpx(context, 26);
+            int padB = P5Theme.dpx(context, 24);
+            setPadding(padL, padT, padR, padB);
+        }
+
+        void playPopIn() {
+            setScaleX(0.92f);
+            setScaleY(0.92f);
+            setAlpha(0f);
+            animate().scaleX(1f).scaleY(1f).alpha(1f)
+                    .setDuration(150)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = P5Theme.dp(getContext(), 1f);
+            float w = getWidth(), h = getHeight();
+            float sh = 6f * d;
+            float l = 3f * d, t = 3f * d, r = w - sh - 2f * d, b = h - sh - 2f * d;
+
+            // Hard 0px-blur offset crimson shadow
+            P5Theme.setCallingCardQuad(shadowPoly, l + sh, t + sh, r + sh, b + sh,
+                    5f * d, 1.5f * d, -2f * d, -1f * d, -5f * d, 0f, 1.5f * d, -1.5f * d);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.P5_RED);
+            c.drawPath(shadowPoly, paint);
+
+            // Cut-paper INK_BLACK body
+            P5Theme.setCallingCardQuad(bodyPoly, l, t, r, b,
+                    5f * d, 1.5f * d, -2f * d, -1f * d, -5f * d, 0f, 1.5f * d, -1.5f * d);
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(bodyPoly, paint);
+
+            // Top crimson accent strip clipped to the card body
+            c.save();
+            c.clipPath(bodyPoly);
+            accentBar.reset();
+            accentBar.moveTo(l, t);
+            accentBar.lineTo(r, t - 2f * d);
+            accentBar.lineTo(r, t + 5f * d);
+            accentBar.lineTo(l, t + 7f * d);
+            accentBar.close();
+            paint.setColor(P5Theme.P5_RED);
+            c.drawPath(accentBar, paint);
+            c.restore();
+
+            // Crisp paper-white outline
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.4f * d);
+            paint.setColor(P5Theme.PAPER_WHITE);
+            c.drawPath(bodyPoly, paint);
+        }
+    }
+
+    // ---- 10. Custom P5 Modal Picker Dialog (Replaces stock Android AlertDialog for lists) ----
 
     interface OnModalPick {
         void onPick(int index);
@@ -711,16 +903,15 @@ final class P5Views {
         if (dlg.getWindow() != null) {
             dlg.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         }
-        int pad = P5Theme.dpx(ctx, 18);
-        LinearLayout box = new LinearLayout(ctx);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(P5Theme.INK_BLACK);
-        box.setPadding(pad, pad, pad, pad);
+        DialogFrameLayout frame = new DialogFrameLayout(ctx);
 
         SectionHeaderView hdr = new SectionHeaderView(ctx, title, "");
-        box.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 380), P5Theme.dpx(ctx, 42)));
+        frame.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 380), P5Theme.dpx(ctx, 42)));
 
         ScrollView sc = new ScrollView(ctx);
+        sc.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        sc.setVerticalFadingEdgeEnabled(true);
+        sc.setFadingEdgeLength(P5Theme.dpx(ctx, 16));
         LinearLayout list = new LinearLayout(ctx);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, P5Theme.dpx(ctx, 10), 0, P5Theme.dpx(ctx, 6));
@@ -743,20 +934,14 @@ final class P5Views {
         sc.addView(list);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
                 P5Theme.dpx(ctx, 380), Math.min(P5Theme.dpx(ctx, 250), labels.length * P5Theme.dpx(ctx, 48) + P5Theme.dpx(ctx, 18)));
-        box.addView(sc, scLp);
+        frame.addView(sc, scLp);
 
-        // White crisp border frame around dialog
-        LinearLayout outer = new LinearLayout(ctx);
-        outer.setBackgroundColor(P5Theme.PAPER_WHITE);
-        int b = P5Theme.dpx(ctx, 2.5f);
-        outer.setPadding(b, b, b, b);
-        outer.addView(box);
-
-        dlg.setContentView(outer);
+        dlg.setContentView(frame);
         dlg.show();
+        frame.playPopIn();
     }
 
-    // ---- 9. Custom P5 Styled Info / Confirm Dialog ----
+    // ---- 11. Custom P5 Styled Info / Confirm Dialog ----
 
     static void showMessageDialog(Context ctx, String title, String message,
                                   String posLabel, final Runnable onPos,
@@ -767,14 +952,10 @@ final class P5Views {
         if (dlg.getWindow() != null) {
             dlg.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         }
-        int pad = P5Theme.dpx(ctx, 18);
-        LinearLayout box = new LinearLayout(ctx);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(P5Theme.INK_BLACK);
-        box.setPadding(pad, pad, pad, pad);
+        DialogFrameLayout frame = new DialogFrameLayout(ctx);
 
         SectionHeaderView hdr = new SectionHeaderView(ctx, title, "");
-        box.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), P5Theme.dpx(ctx, 42)));
+        frame.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), P5Theme.dpx(ctx, 42)));
 
         TextView msg = new TextView(ctx);
         msg.setText(message);
@@ -783,7 +964,7 @@ final class P5Views {
         msg.setTextSize(14);
         msg.setLineSpacing(P5Theme.dp(ctx, 3), 1f);
         msg.setPadding(P5Theme.dpx(ctx, 4), P5Theme.dpx(ctx, 12), P5Theme.dpx(ctx, 4), P5Theme.dpx(ctx, 16));
-        box.addView(msg, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
+        frame.addView(msg, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout actions = new LinearLayout(ctx);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -821,15 +1002,10 @@ final class P5Views {
             }
         });
         actions.addView(pos, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, P5Theme.dpx(ctx, 40)));
-        box.addView(actions, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
+        frame.addView(actions, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        LinearLayout outer = new LinearLayout(ctx);
-        outer.setBackgroundColor(P5Theme.PAPER_WHITE);
-        int b = P5Theme.dpx(ctx, 2.5f);
-        outer.setPadding(b, b, b, b);
-        outer.addView(box);
-
-        dlg.setContentView(outer);
+        dlg.setContentView(frame);
         dlg.show();
+        frame.playPopIn();
     }
 }

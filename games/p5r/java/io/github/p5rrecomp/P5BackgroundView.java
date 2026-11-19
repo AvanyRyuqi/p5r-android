@@ -29,6 +29,7 @@ final class P5BackgroundView extends View {
     private final Path slashPath = new Path();
 
     private boolean settingsMode = false;
+    private int wallpaperDimLevel = 1; // 0 = light, 1 = medium, 2 = dark
     private float scrimAlpha = 0f; // 0 = home, 1 = settings
     private float slashProgress = 1f; // 0 -> 1 kinetic sweep on tab switch
     private ValueAnimator slashAnim;
@@ -41,6 +42,11 @@ final class P5BackgroundView extends View {
     void setWallpaper(Bitmap bmp) {
         this.wallpaper = bmp;
         updateWallpaperMatrix();
+        invalidate();
+    }
+
+    void setWallpaperDim(int level) {
+        this.wallpaperDimLevel = Math.max(0, Math.min(2, level));
         invalidate();
     }
 
@@ -254,9 +260,9 @@ final class P5BackgroundView extends View {
         if (wallpaper != null && !wallpaper.isRecycled()) {
             canvas.drawColor(P5Theme.INK_BLACK);
             canvas.drawBitmap(wallpaper, wpMatrix, bitmapPaint);
-            // Crisp dark scrim so foreground UI stays 100% readable over any user image
-            int homeA = 110;
-            int setA = 205;
+            // User-tunable dim scrim on Home (Light / Medium / Dark); always legible on Settings tabs
+            int homeA = (wallpaperDimLevel == 0) ? 50 : (wallpaperDimLevel == 2 ? 172 : 112);
+            int setA = (wallpaperDimLevel == 0) ? 188 : (wallpaperDimLevel == 2 ? 228 : 208);
             int a = Math.round(homeA + (setA - homeA) * scrimAlpha);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(android.graphics.Color.argb(a, 10, 10, 12));
