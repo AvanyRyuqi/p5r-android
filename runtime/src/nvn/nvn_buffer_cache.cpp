@@ -205,6 +205,7 @@ std::vector<Retired> g_retired;
 uint64_t g_used = 0;     // bytes allocated
 uint64_t g_submits = 0;  // cache_begin_submit calls
 uint64_t g_budget = 0;
+uint64_t g_evict_epoch = 1;
 
 inline void record_page_churn(PageChurn& pc) {
     const uint32_t win = uint32_t(g_submits >> 4);
@@ -286,6 +287,7 @@ void evict_stale() {
             const uint8_t* key_p = it->first;
             clear_entry_front(key_p);
             retire(it->second);
+            g_evict_epoch++;
             g_stats_cache.evicted++;
             PageChurn& pc = g_page_churn[page_churn_index(key_p)];
             if (pc.cached_count > 0) {
@@ -315,11 +317,21 @@ bool alloc(uint32_t c, Slot& out) {
 
 }  // namespace
 
+bool is_buffer_cache_buffer(VkBuffer buf) {
+    if (buf == VK_NULL_HANDLE) return false;
+    for (const Block& b : g_blocks)
+        if (b.buffer == buf) return true;
+    return false;
+}
+
+uint64_t cache_evict_epoch() { return g_evict_epoch; }
+
 void cache_evict_address(const uint8_t* p) {
     if (!on() || !p) return;
     if (auto it = g_entries.find(p); it != g_entries.end()) {
         clear_entry_front(p);
         retire(it->second);
+        g_evict_epoch++;
         g_stats_cache.evicted++;
         PageChurn& pc = g_page_churn[page_churn_index(p)];
         if (pc.cached_count > 0) {
@@ -446,6 +458,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
             return true;
         }
         retire(e);  // read by the submits up to e.serial: freed after them
+        g_evict_epoch++;
         if (pc.cached_count > 0) {
             if (--pc.cached_count == 0) pc.cached_bloom = 0;
         }

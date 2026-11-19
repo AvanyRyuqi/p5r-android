@@ -129,6 +129,10 @@ struct Bound {
     bool last_indexed = false;
     bool last_tex_empty = false;
     bool last_ui_draw = false;
+    bool last_uw_wide = false;
+    bool last_hud_target = false;
+    bool last_shadow_target = false;
+    bool last_low_3d_target = false;
     VkFormat last_depth_format = VK_FORMAT_MAX_ENUM;
     uint32_t last_color_count = UINT32_MAX;
     uint32_t last_ufloat_colors = UINT32_MAX;
@@ -156,6 +160,20 @@ void bind_vertex(VkCommandBuffer cb, uint32_t binding, const Upload& u) {
 void bind_vertex_streams(VkCommandBuffer cb, uint32_t used_mask, const Upload* streams) {
     const DynamicStateCaps& dc = vk_dynamic_caps();
     const bool dyn_stride = dc.vertex_stride;
+    if (__builtin_expect(used_mask == 1u && !dyn_stride && (g_bound.vertex_set & (1u << 15)), 1)) {
+        const Upload& u = streams[0];
+        const Upload& now = g_bound.vertex[0];
+        if ((g_bound.vertex_set & 1u) && now.buffer == u.buffer && now.offset == u.offset) {
+            g_state_kept += 2;
+            return;
+        }
+        p_vkCmdBindVertexBuffers(cb, 0, 1, &u.buffer, &u.offset);
+        g_bound.vertex[0] = u;
+        g_bound.vertex_set |= 1u;
+        g_state_set++;
+        g_state_kept++;
+        return;
+    }
     uint32_t active_mask = (used_mask & 0xFFFFu) | (1u << 15);
     uint32_t need_mask = 0;
     const Upload zero = zero_stream();
@@ -915,6 +933,10 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     b.last_indexed = indexed;
     b.last_tex_empty = tex_empty;
     b.last_ui_draw = ui_draw;
+    b.last_uw_wide = g_uw_wide;
+    b.last_hud_target = g_hud_target;
+    b.last_shadow_target = g_shadow_target;
+    b.last_low_3d_target = g_low_3d_target;
     b.last_depth_format = s_cached_depth_format;
     b.last_color_count = cnt;
     b.last_ufloat_colors = s_cached_ufloat_colors;
@@ -1441,8 +1463,9 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         bool textures_empty = false;
         bool ui_draw = false;
     };
-    static constexpr size_t kPipeFastBuckets = 64;
-    static PipeMru s_pipe_mru[kPipeFastBuckets][2]{};
+    static constexpr size_t kPipeFastBuckets = 256;
+    static constexpr int kPipeFastWays = 4;
+    static PipeMru s_pipe_mru[kPipeFastBuckets][kPipeFastWays]{};
     static uint32_t s_last_pipe_state_ver = 0;
     static uint32_t s_last_attrib_ver_for_hash = 0;
     static uint64_t s_cached_attrib_hash_lo = 0, s_cached_attrib_hash_hi = 0;
@@ -1517,7 +1540,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                               (kPipeFastBuckets - 1));
     if (allow_fast_pipe) {
         PipeMru* ways = s_pipe_mru[pf_bucket];
-        for (int w = 0; w < 2; w++) {
+        for (int w = 0; w < kPipeFastWays; w++) {
             const PipeMru& e = ways[w];
             if (e.pipeline != VK_NULL_HANDLE &&
                 e.vs == vs &&
@@ -1532,7 +1555,11 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 e.ui_draw == ui_draw) {
                 pipeline = e.pipeline;
                 g_draw_prof.pipe_fast_hits++;
-                if (w == 1) std::swap(ways[0], ways[1]);
+                if (w > 0) {
+                    PipeMru hit = ways[w];
+                    for (int j = w; j > 0; j--) ways[j] = ways[j - 1];
+                    ways[0] = hit;
+                }
                 break;
             }
         }
@@ -1653,7 +1680,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         if (pipeline != VK_NULL_HANDLE && allow_fast_pipe) {
             PipeMru* ways = s_pipe_mru[pf_bucket];
-            ways[1] = ways[0];
+            for (int j = kPipeFastWays - 1; j > 0; j--) ways[j] = ways[j - 1];
             ways[0] = {vs, fs, s_cached_formats_hash, s_cached_pipe_hash_lo, s_cached_pipe_hash_hi,
                        layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw};
         }
@@ -1680,6 +1707,22 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     // The vertex buffers resolved above, plus the zero stream (binding 15), batched in contiguous runs.
     bind_vertex_streams(cb, in.used, in.vertex);
 
+    const bool exp_draw = s_exp3d && g_state.depth.depth_test && g_pass_extent.width == 960;
+    const bool skip_dynamic =
+        g_bound.has_dynamic && !live_flags() && !s_keep_hud_alpha && !s_exp3d &&
+        g_bound.dynamic_version == replay::g_dynamic_state_version &&
+        g_bound.last_mode == mode && g_bound.last_indexed == indexed &&
+        g_bound.last_tex_empty == tex_empty && g_bound.last_ui_draw == ui_draw &&
+        g_bound.last_depth_format == s_cached_depth_format &&
+        g_bound.last_color_count == std::min<uint32_t>(tt.color_count, 8) &&
+        g_bound.last_ufloat_colors == s_cached_ufloat_colors &&
+        g_bound.last_pass_extent.width == g_pass_extent.width &&
+        g_bound.last_pass_extent.height == g_pass_extent.height &&
+        g_bound.last_uw_wide == g_uw_wide &&
+        g_bound.last_hud_target == g_hud_target &&
+        g_bound.last_shadow_target == g_shadow_target &&
+        g_bound.last_low_3d_target == g_low_3d_target;
+    if (!skip_dynamic) {
     VkViewport vp{0, 0, float(g_pass_extent.width), float(g_pass_extent.height), 0, 1};
     if (g_state.has_viewport)
         vp = {float(g_state.viewport[0]), float(g_state.viewport[1]), float(g_state.viewport[2]),
@@ -1733,10 +1776,6 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             sc = {{x0, y0}, {uint32_t(std::max<int64_t>(1, x1 - x0)), uint32_t(std::max<int64_t>(1, y1 - y0))}};
         }
     }
-    // NX_EXP_3D (an experiment, the picture breaks): on the 3D draws (depth test, a 960-wide pass) "scissor" keeps
-    // one pixel (what is left is the vertex and per-draw cost), "tri" draws one triangle (per-draw cost alone),
-    // "small" draws into the top-left 3/4 x 3/4 (the GPU work of a 720x405 3D picture).
-    const bool exp_draw = s_exp3d && g_state.depth.depth_test && g_pass_extent.width == 960;
     if (exp_draw && s_exp3d == 1) sc = {{0, 0}, {1, 1}};
     if (exp_draw && s_exp3d == 3) {
         vp.x *= 0.75f, vp.y *= 0.75f, vp.width *= 0.75f, vp.height *= 0.75f;
@@ -1744,6 +1783,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
     vp.y += vp.height, vp.height = -vp.height;
     set_dynamic(cb, vp, sc, tt, mode, indexed, tex_empty);
+    }
 
     trace_skin(indexed, c, vs, fs);
     if (indexed) {

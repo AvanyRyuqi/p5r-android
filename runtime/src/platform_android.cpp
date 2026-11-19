@@ -820,8 +820,7 @@ void crash(int sig, siginfo_t* info, void* uc) {
 }
 
 void game_thread(void*) {
-    nx::plat::place_fast_cores();
-    nx::plat::set_thread_priority(-4);
+    nx::plat::pin_thread_tid_to_big_cores(nx::plat::current_thread_id(), -4);
     nx::plat::perf_hint_thread();
     try {
         nx::boot();

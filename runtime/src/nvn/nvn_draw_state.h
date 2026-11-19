@@ -63,6 +63,7 @@ extern uint32_t g_dynamic_state_version;
 extern uint32_t g_attrib_state_version;
 extern uint32_t g_tex_state_version;
 extern uint32_t g_targets_version;
+extern uint32_t g_uniform_state_version[kStages];
 extern uint32_t g_storage_state_version[kStages];
 extern bool g_hud_target;  // NX_HUD_1080: this draw's target is a 1920x1080 image of a 1280x720 texture (nvn_vk.h)
 extern bool g_low_3d_target;  // NX_LOW_3D: this draw's target is a 720x405 image of a 960x540 texture (nvn_vk.h)
@@ -106,6 +107,8 @@ enum UploadKind : uint8_t { kUploadOther, kUploadVertex, kUploadIndex, kUploadBl
 extern UploadKind g_upload_kind;  // also: only guest buffers (not kUploadOther) go through the buffer cache
 // nvn_buffer_cache.cpp: copies of guest buffers kept across submits while their bytes stay the same.
 bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align, Upload& out);
+bool is_buffer_cache_buffer(VkBuffer buf);
+uint64_t cache_evict_epoch();
 void cache_evict_address(const uint8_t* p);
 void cache_begin_submit();  // frees the copies retired submits read
 void cache_log();
