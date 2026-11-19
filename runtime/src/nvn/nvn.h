@@ -407,6 +407,7 @@ void gpu_submit(const std::vector<std::shared_ptr<CmdList>>& lists, std::shared_
 const DeferredValues* current_deferred();  // the submit being replayed
 // nvn_worker.cpp: the replay thread. worker_run queues a job (runs it at once when the thread is off) and returns its
 // serial (0: done); worker_wait waits for a serial; worker_finish for everything queued so far.
+bool worker_enabled();
 uint64_t worker_run(std::function<void()> job);
 void worker_wait(uint64_t serial);
 uint64_t worker_last();
