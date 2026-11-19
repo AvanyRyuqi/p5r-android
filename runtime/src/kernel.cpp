@@ -100,6 +100,14 @@ void repin_guest_workers_to_little_cores(int64_t replay_tid) {
             plat::pin_thread_tid_to_big_cores(t->host_tid, -4);
             continue;
         }
+        if (t->id == 0x52 || t->id == 0x53) {
+            // P5R's active culling/command-recording workers: allow Little cores + Big core 6 (m.main_non_replay,
+            // never CPU 7) so they accelerate on CPU 6 while nnMain sleeps in TimedWait, eliminating movement stalls
+            // without ever preempting replay+present on CPU 7.
+            t->is_replay = false;
+            plat::pin_thread_tid_to_big_cores(t->host_tid, -2);
+            continue;
+        }
         t->is_replay = false;
         plat::pin_thread_tid_to_little_cores(t->host_tid);
     }
