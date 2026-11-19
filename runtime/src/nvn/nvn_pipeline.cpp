@@ -104,6 +104,14 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
             if (patch_x_scale(code, scaled)) code.swap(scaled);
             else log("nvn/vk: shader %s: ultrawide x scale not patched", s->hash.c_str());
         }
+        if (s->stage == ShaderStage::Fragment && uw_on()) {  // NX_ULTRAWIDE: gl_FragCoord.x * spec constant 0
+            std::vector<uint32_t> scaled;
+            if (patch_frag_coord_x(code, scaled)) {
+                code.swap(scaled);
+                uw_mark_fs_fragcoord(s);
+                log("nvn/vk: shader %s: ultrawide FragCoord.x patched", s->hash.c_str());
+            }
+        }
         if (s->stage == ShaderStage::Vertex) clip_z_module(s, code);  // NX_CLIP_Z_PATCH (nvn_spirv_clip.cpp)
         if (const char* opt = std::getenv("NX_SPIRV_OPT"); opt || std::getenv("NX_SPIRV_TOOL")) {  // diagnostic: each module through `spirv-opt <flags>` (NX_SPIRV_OPT) or `<tool> in out` (NX_SPIRV_TOOL) first
             static int n = 0;
@@ -374,7 +382,9 @@ PipelineKey canonical_key(const PipelineKey& in);
 struct PipeBuild {
     VkPipelineShaderStageCreateInfo stages[2]{};
     VkSpecializationInfo spec_info{};
+    VkSpecializationInfo frag_spec_info{};
     float uw_x_value = 1.0f;
+    float uw_frag_x_value = 1.0f;
     uint32_t nstages = 0;
     std::vector<VkVertexInputAttributeDescription> attrs;
     std::vector<VkVertexInputBindingDescription> binds;
@@ -882,6 +892,7 @@ PipelineKey canonical_key(const PipelineKey& in) {
     k.alpha_to_coverage = (!dc.alpha_to_coverage_enable && in.alpha_to_coverage) ? 1 : 0;
     k.restart = dc.primitive_restart_enable ? 0 : in.restart;
     k.uw_x = in.uw_x;
+    k.uw_frag_x = in.uw_frag_x;
     return k;
 }
 
@@ -893,7 +904,9 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     std::memcpy(B.color_formats, key.color_formats, sizeof B.color_formats);
     VkPipelineShaderStageCreateInfo(&stages)[2] = B.stages;
     VkSpecializationInfo& spec_info = B.spec_info;
+    VkSpecializationInfo& frag_spec_info = B.frag_spec_info;
     float& uw_x_value = B.uw_x_value;
+    float& uw_frag_x_value = B.uw_frag_x_value;
     uint32_t& nstages = B.nstages;
     uint8_t int_kinds[16] = {};
     for (uint32_t a = 0; a < key.attrib_count && a < 16; a++) int_kinds[a] = uint8_t(vertex_int_kind(key.attribs[a].format));
@@ -925,6 +938,12 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
             spec_info = {1, &entry, sizeof(float), &uw_x_value};
             uw_x_value = key.uw_x;
             st.pSpecializationInfo = &spec_info;
+        }
+        if (s == key.fs && key.uw_frag_x > 0 && uw_fs_has_fragcoord(s)) {  // NX_ULTRAWIDE: constant 0 of patched FragCoord.x
+            static VkSpecializationMapEntry fentry{0, 0, sizeof(float)};
+            frag_spec_info = {1, &fentry, sizeof(float), &uw_frag_x_value};
+            uw_frag_x_value = key.uw_frag_x;
+            st.pSpecializationInfo = &frag_spec_info;
         }
     }
 
