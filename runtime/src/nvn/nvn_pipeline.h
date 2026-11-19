@@ -81,7 +81,8 @@ struct PipelineKey {
     uint32_t ufloat_colors = 0;  // bit k: colour target k is R11G11B10F (no alpha: destination alpha reads 1)
     uint32_t alpha_to_coverage = 0;  // BindMultisampleState (G7)
     uint32_t restart = 0;  // primitive restart for a strip or fan (SetPrimitiveRestart; nvn_draw.cpp)
-    float uw_x = 0;  // NX_ULTRAWIDE: gl_Position.x scale of the vertex stage (0: none, the module has no constant)
+    float uw_x = 0;       // NX_ULTRAWIDE: gl_Position.x scale of the vertex stage (0: none, the module has no constant)
+    float uw_frag_x = 0;  // NX_ULTRAWIDE: gl_FragCoord.x scale of the fragment stage on widened targets (0: none)
 };
 VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout, bool allow_async = true);
 bool pipeline_workers_busy();
