@@ -1734,12 +1734,15 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         uw_ui_vertex_shader(vs);
     }
     bool uw_scaled = false;
-    if (g_uw_wide && (!s_uw_cam_patch || !uw_stretch_ui())) {
+    if (g_uw_wide) {
         // NX_UW_UI=learn: only learned UI vertex shaders; default: screen-space UI (!depth_test) plus P5R 1280x720
         // RGBA8 UI / 3D-in-UI passes (live_ui_draw(tt), e.g. Joker's 3D bust in STATS and battle/menu portraits).
-        const bool ui_pick = !s_uw_cam_patch ||
-                             (s_uw_ui_learn ? uw_is_ui_vertex_shader(vs) : (!g_state.depth.depth_test || ui_draw));
-        if (ui_pick && uw_vs_scaled(vs)) {
+        const bool is_ui_pass = s_uw_ui_learn ? uw_is_ui_vertex_shader(vs) : (!g_state.depth.depth_test || ui_draw);
+        // When s_uw_cam_patch is true (guest camera aspect patched), only 2D UI is squeezed (unless NX_UW_STRETCH_UI=1).
+        // When s_uw_cam_patch is false (GPU-side Hor+ projection), 3D world draws are always squeezed by 1/k for true
+        // Hor+ proportions, while 2D UI follows NX_UW_STRETCH_UI (0 = 16:9 centered, 1 = stretched full width).
+        const bool want_scale = s_uw_cam_patch ? (!uw_stretch_ui() && is_ui_pass) : (!is_ui_pass || !uw_stretch_ui());
+        if (want_scale && uw_vs_scaled(vs)) {
             bool samples_wide = false;
             const uint64_t vcount = indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]);
             if (vcount <= 6)

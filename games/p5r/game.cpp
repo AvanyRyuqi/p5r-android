@@ -25,6 +25,8 @@ namespace nx {
 namespace nvn {
 uint64_t presents_recorded();  // runtime nvn_state.cpp: nvnQueuePresentTexture calls so far
 void linear_write_back_pause(bool paused);  // runtime nvn_draw.cpp: no copies of linear targets back to memory
+float uw_factor();
+inline bool uw_on() { return uw_factor() > 1.0f; }
 }
 
 const game::Info game::kInfo = {"p5r", "Persona 5 Royal", 0x01005CA01580E000ull, "io.github.p5rrecomp",
@@ -485,17 +487,122 @@ int reject_plane(const Planes& pl, const float* b, float* dist = nullptr, float*
     return -1;
 }
 
+// Widen the left & right frustum planes (indices 2..5 with the largest forward component along Near plane normal)
+// by factor k around the camera eye intersection E so GPU-side Hor+ widescreen never pops props/walls at 20:9 edges.
+Planes widen_frustum_planes(const Planes& pl, float k) {
+    if (!pl.ptr || k <= 1.01f) return pl;
+    auto norm3 = [](float& x, float& y, float& z, float& d) -> bool {
+        const float len = std::sqrt(x * x + y * y + z * z);
+        if (!std::isfinite(len) || len < 1e-6f) return false;
+        const float inv = 1.0f / len;
+        x *= inv, y *= inv, z *= inv, d *= inv;
+        return true;
+    };
+    Planes out = pl;
+    for (int m = 0; m < 6; m++)
+        if (!norm3(out.p[m][0], out.p[m][1], out.p[m][2], out.p[m][3])) return pl;
+    const float fx = out.p[0][0], fy = out.p[0][1], fz = out.p[0][2];
+    float s[6] = {};
+    int order[4] = {2, 3, 4, 5};
+    for (int m = 2; m < 6; m++)
+        s[m] = out.p[m][0] * fx + out.p[m][1] * fy + out.p[m][2] * fz;
+    std::sort(order, order + 4, [&](int a, int b) { return s[a] > s[b]; });
+    const int iL = order[0], iR = order[1], iT = order[2];
+    if (s[iL] <= 0.01f || s[iR] <= 0.01f) return pl;
+    const float* pL = out.p[iL];
+    const float* pR = out.p[iR];
+    const float* pT = out.p[iT];
+    auto cross = [](const float* a, const float* b, float r[3]) {
+        r[0] = a[1] * b[2] - a[2] * b[1];
+        r[1] = a[2] * b[0] - a[0] * b[2];
+        r[2] = a[0] * b[1] - a[1] * b[0];
+    };
+    float cRT[3], cTL[3], cLR[3];
+    cross(pR, pT, cRT);
+    cross(pT, pL, cTL);
+    cross(pL, pR, cLR);
+    const float det = pL[0] * cRT[0] + pL[1] * cRT[1] + pL[2] * cRT[2];
+    if (!std::isfinite(det) || std::fabs(det) < 1e-6f) return pl;
+    const float inv_det = 1.0f / det;
+    const float ex = (cRT[0] * pL[3] + cTL[0] * pR[3] + cLR[0] * pT[3]) * inv_det;
+    const float ey = (cRT[1] * pL[3] + cTL[1] * pR[3] + cLR[1] * pT[3]) * inv_det;
+    const float ez = (cRT[2] * pL[3] + cTL[2] * pR[3] + cLR[2] * pT[3]) * inv_det;
+    if (!std::isfinite(ex) || !std::isfinite(ey) || !std::isfinite(ez)) return pl;
+    for (int idx : {iL, iR}) {
+        float* pm = out.p[idx];
+        const float sm = s[idx];
+        const float vx = pm[0] - sm * fx;
+        const float vy = pm[1] - sm * fy;
+        const float vz = pm[2] - sm * fz;
+        float nx = k * sm * fx + vx;
+        float ny = k * sm * fy + vy;
+        float nz = k * sm * fz + vz;
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!std::isfinite(len) || len < 1e-6f) continue;
+        nx /= len, ny /= len, nz /= len;
+        pm[0] = nx, pm[1] = ny, pm[2] = nz;
+        pm[3] = nx * ex + ny * ey + nz * ez;
+    }
+    return out;
+}
+
+static std::atomic<uint64_t> g_uw_frustum_rescued{0};
+
 void cull_job_hook(CPU& c) {
     const uint64_t job = c.x[0];
     if (!job) return;
     const uint64_t model = ld<uint64_t>(job), states = ld<uint64_t>(job + 8);
     const uint64_t sp = c.x[31];
     static const bool trace_cull = std::getenv("NX_P5R_CULL_CHECK") != nullptr;
+    static const bool uw_frustum_env = !(std::getenv("NX_UW_CAMERA") && std::getenv("NX_UW_CAMERA")[0] == '1');
+    const bool uw_frustum = uw_frustum_env && nvn::uw_on();
     const Planes before = trace_cull ? read_planes(true) : Planes{};
     call(c, g_cull_job);
-    const Planes after = read_planes(trace_cull);
+    const Planes after = read_planes(trace_cull || uw_frustum);
     const uint64_t list = model ? ld<uint64_t>(model + 0x38) : 0;
     if (!list || !states) return;
+
+    if (uw_frustum && after.ptr) {
+        const int n = int(ld<uint32_t>(list + 8));
+        const int64_t stride = int32_t(ld<uint32_t>(list + 4)), sstride = int32_t(ld<uint32_t>(states + 4));
+        const uint64_t arr = ld<uint64_t>(list + 0x10), sarr = ld<uint64_t>(states + 0x10);
+        if (arr && sarr && stride > 0 && sstride > 0) {
+            const Planes wide = widen_frustum_planes(after, nvn::uw_factor() * 1.05f);
+            const uint64_t box = (sp - 0x200) & ~uint64_t(15);
+            uint64_t last_node = 0;
+            uint64_t last_matrix = 0;
+            for (int i = 0; i < n && i < 4096; i++) {
+                const uint64_t mesh = ld<uint64_t>(arr + stride * i);
+                if (!mesh) continue;
+                uint32_t flags = ld<uint32_t>(mesh + 0x20);
+                if (!((flags >> 14) & 1)) continue;  // Already visible
+                const uint8_t st_val = ld<uint8_t>(sarr + sstride * i + 0x10);
+                if ((st_val & 3u) != 1u) continue;  // Only rescue frustum-culled meshes (reason 1)
+                const uint64_t node = ld<uint64_t>(mesh + 8);
+                if (!node) continue;
+                CPU scratch = c;
+                scratch.x[31] = sp;
+                const uint64_t matrix = (node == last_node) ? last_matrix : guest_fn(scratch, 0xfa9460, node);
+                if (!matrix) continue;
+                last_node = node;
+                last_matrix = matrix;
+                guest_fn(scratch, 0xa92c80, box, mesh + 0x90, matrix);
+                float b[19];
+                for (int k = 0; k < 19; k++) {
+                    const uint32_t w = ld<uint32_t>(box + 4 * k);
+                    std::memcpy(&b[k], &w, 4);
+                }
+                if (reject_plane(wide, b) == -1) {
+                    flags &= ~(1u << 14);
+                    st<uint32_t>(mesh + 0x20, flags);
+                    st<uint8_t>(sarr + sstride * i + 0x10, st_val & ~uint8_t(3u));
+                    if (g_uw_frustum_rescued.fetch_add(1, std::memory_order_relaxed) == 0) {
+                        log("p5r: ultrawide frustum widening active (k=%.3f)", double(nvn::uw_factor()));
+                    }
+                }
+            }
+        }
+    }
 
     static const bool dist_cull_on = [] {
         const char* e = std::getenv("NX_P5R_DIST_CULL");
@@ -726,12 +833,17 @@ void game::after_init() {
     // Its plain alpha-blended HUD art (textured draws only) leaves the HUD target's alpha alone (runtime nvn_draw.cpp,
     // PROGRESO 70-71): the faces' translucent layers came out grey with the threshold alone.
     setenv("NX_HUD_KEEP_ALPHA", "1", 0);
+    // Default P5R True Widescreen to crash-free GPU-side Hor+ projection + frustum-plane widening
+    // (avoiding guest heap camera scanning/patching which triggers main+104e7d0 crashes on area transitions).
+    setenv("NX_UW_CAMERA", "0", 0);
 #endif
     const LoadedModule* m = module_at(find_symbol("nnMain"));
     if (m && (g_interval_setter = hook_function(m->base + 0x1048ee0, interval_setter_hook))) {
         g_main_base = m->base;
         const char* dc = std::getenv("NX_P5R_DIST_CULL");
-        if ((std::getenv("NX_P5R_CULL_CHECK") || (dc && dc[0] == '1')) &&
+        const char* uw = std::getenv("NX_ULTRAWIDE");
+        const bool uw_env = uw && *uw && uw[0] != '0';
+        if ((std::getenv("NX_P5R_CULL_CHECK") || (dc && dc[0] == '1') || uw_env) &&
             !(g_cull_job = hook_function(m->base + 0xab0f50, cull_job_hook)))
             log("p5r: the culling job could not be hooked");
     } else {
