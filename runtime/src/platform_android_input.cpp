@@ -269,6 +269,7 @@ int32_t on_input(android_app*, AInputEvent* e) {
                     std::fclose(f);
                 }
                 nx::log("debug hotkey (3-finger tap): armed trace_draws + dump_frames");
+                show_toast("Debug trace captured");
             }
         }
         return 1;
