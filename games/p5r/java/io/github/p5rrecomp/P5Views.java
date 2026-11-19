@@ -486,29 +486,34 @@ final class P5Views {
             paint.setColor(P5Theme.INK_BLACK);
             c.drawPath(segPath, paint);
 
-            for (int i = 0; i < labels.length; i++) {
-                float sl = pad + i * segW;
-                float sr = sl + segW + skew;
-                boolean act = (i == selected);
-                boolean actOff = act && offOnToggle && i == 0;
-                P5Theme.setSlantedQuad(segPath, sl, pad, sr, h - pad, skew, skew);
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(actOff ? Color.rgb(46, 46, 56) : (act ? P5Theme.P5_RED : P5Theme.INK_ELEVATED));
-                c.drawPath(segPath, paint);
+            // Draw inactive segments first, then the active segment LAST so its white border is never painted over
+            for (int pass = 0; pass < 2; pass++) {
+                boolean drawActive = (pass == 1);
+                for (int i = 0; i < labels.length; i++) {
+                    boolean act = (i == selected);
+                    if (act != drawActive) continue;
+                    float sl = pad + i * segW;
+                    float sr = sl + segW + skew;
+                    boolean actOff = act && offOnToggle && i == 0;
+                    P5Theme.setSlantedQuad(segPath, sl, pad, sr, h - pad, skew, skew);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(actOff ? Color.rgb(46, 46, 56) : (act ? P5Theme.P5_RED : P5Theme.INK_ELEVATED));
+                    c.drawPath(segPath, paint);
 
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth((act ? 1.8f : 1.3f) * d);
-                paint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.BORDER_SUBTLE);
-                c.drawPath(segPath, paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth((act ? 2.0f : 1.3f) * d);
+                    paint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.BORDER_SUBTLE);
+                    c.drawPath(segPath, paint);
 
-                // Compact label
-                String txt = labels[i];
-                float ts = (labels.length >= 5 ? 11.5f : 12.5f) * d;
-                textPaint.setTextSize(ts);
-                textPaint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.MUTED_TEXT);
-                Paint.FontMetrics fm = textPaint.getFontMetrics();
-                float base = h * 0.5f - (fm.ascent + fm.descent) * 0.5f;
-                c.drawText(txt, sl + (segW + skew) * 0.5f, base, textPaint);
+                    // Compact label
+                    String txt = labels[i];
+                    float ts = (labels.length >= 5 ? 11.5f : 12.5f) * d;
+                    textPaint.setTextSize(ts);
+                    textPaint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.MUTED_TEXT);
+                    Paint.FontMetrics fm = textPaint.getFontMetrics();
+                    float base = h * 0.5f - (fm.ascent + fm.descent) * 0.5f;
+                    c.drawText(txt, sl + (segW + skew) * 0.5f, base, textPaint);
+                }
             }
         }
     }
