@@ -245,9 +245,35 @@ int32_t on_input(android_app*, AInputEvent* e) {
         return 1;
     }
     if ((src & AINPUT_SOURCE_TOUCHSCREEN) != AINPUT_SOURCE_TOUCHSCREEN) return 0;
-    if (!touch_enabled()) return 0;  // NX_TOUCH_SHOW=0
     int32_t action = AMotionEvent_getAction(e);
     int32_t kind = action & AMOTION_EVENT_ACTION_MASK;
+    // 3-finger tap anywhere on screen (only when Debug logging / NX_ENABLE_LOG=1 is enabled):
+    // arms a 1-frame draw trace (trace_draws) + frame dump (dump_frames) with a 2-second debounce.
+    if (kind == AMOTION_EVENT_ACTION_POINTER_DOWN && AMotionEvent_getPointerCount(e) == 3) {
+        static const bool log_on = [] {
+            const char* en = std::getenv("NX_ENABLE_LOG");
+            return !en || (en[0] != '0' && std::strcmp(en, "false") != 0);
+        }();
+        static uint64_t s_last_hotkey_ns = 0;
+        const uint64_t now_hk = monotonic_ns();
+        if (log_on && now_hk >= s_last_hotkey_ns + 2'000'000'000ull) {
+            s_last_hotkey_ns = now_hk;
+            const std::string root = data_root();
+            if (!root.empty()) {
+                if (FILE* f = fopen_utf8(root + "/trace_draws", "wb")) {
+                    std::fputs("1\n", f);
+                    std::fclose(f);
+                }
+                if (FILE* f = fopen_utf8(root + "/dump_frames", "wb")) {
+                    std::fputs("1 1\n", f);
+                    std::fclose(f);
+                }
+                nx::log("debug hotkey (3-finger tap): armed trace_draws + dump_frames");
+            }
+        }
+        return 1;
+    }
+    if (!touch_enabled()) return 0;  // NX_TOUCH_SHOW=0
     size_t index = size_t((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
     const uint64_t now = monotonic_ns();
     g_last_touch_ns = now;
