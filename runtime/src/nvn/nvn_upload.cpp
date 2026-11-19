@@ -17,17 +17,22 @@ uint64_t hash_memory(const uint8_t* p, uint64_t size);  // nvn_sampler.cpp
 
 uint64_t tex_sample_hash(const uint8_t* p, uint64_t size) {
     if (!p || !size) return 0;
-    if (size <= 192) {
+    // Hash <= 16 KB textures completely (exact on every glyph/icon/small UI texture; < 2 us on ARM64 CRC32).
+    if (size <= 16384) {
         uint64_t h = hash_memory(p, size) ^ (size * 0x9E3779B97F4A7C15ull);
         for (uint64_t k = size & ~7ull; k < size; k++) h = (h ^ p[k]) * 0x100000001B3ull;
         return h ? h : 1;
     }
+    // Larger textures: sample 8 evenly-spaced 64-byte chunks (512 bytes) across the storage.
     constexpr uint64_t kChunk = 64;
-    const uint64_t mid = (size / 2) & ~7ull;
-    const uint64_t tail = (size - kChunk) & ~7ull;
-    uint64_t h = hash_memory(p, kChunk) ^ (size * 0x9E3779B97F4A7C15ull);
-    h ^= hash_memory(p + mid, kChunk) * 0x9E3779B97F4A7C15ull;
-    h ^= hash_memory(p + tail, kChunk) * 0xC2B2AE3D27D4EB4Full;
+    constexpr uint64_t kSamples = 8;
+    const uint64_t span = size - kChunk;
+    uint64_t h = size * 0x9E3779B97F4A7C15ull;
+    for (uint64_t i = 0; i < kSamples; i++) {
+        const uint64_t off = ((span * i) / (kSamples - 1)) & ~7ull;
+        h ^= hash_memory(p + off, kChunk) * (0x9E3779B97F4A7C15ull ^ (i * 0xC2B2AE3D27D4EB4Full));
+        h = (h << 13) | (h >> 51);
+    }
     return h ? h : 1;
 }
 
