@@ -231,6 +231,10 @@ void debug_dump_add(uint64_t texture);  // nvn_debug.cpp: read back at the end o
 // offline (the battle portrait's specks).
 void debug_hud_note(uint64_t target, const std::vector<uint64_t>& textures);
 void debug_hud_dump(uint64_t frame);
+// In-memory runtime capture hotkey (works in NX_RELEASE builds when NX_ENABLE_LOG=1, e.g. Android 3-finger tap):
+// arms 1-frame draw trace + HUD texture dump + 2-frame presented PPM readback without file polling.
+void debug_arm_hotkey_trace();
+void debug_request_capture();
 
 // nvn_frames.cpp: submits that are not waited for (NX_PIPELINED, NX_ASYNC_GPU). Slots of command buffers, fences,
 // descriptor pool and ring stretch; retired (fences waited, write-backs copied if not yet) on reuse, when the ring is
