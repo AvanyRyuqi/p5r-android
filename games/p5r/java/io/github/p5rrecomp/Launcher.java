@@ -103,7 +103,6 @@ public class Launcher extends Activity {
     // Hybrid PLAY buttons: heroPlay shown on TAB_PLAY, pinnedPlay shown on Settings tabs
     private P5Views.SlashButton heroPlay;
     private P5Views.SlashButton pinnedPlay;
-    private P5Views.SlashButton heroResetWp;
     private TextView railStatusText;
     private TextView heroStatusTitle;
     private TextView heroStatusBody;
@@ -371,7 +370,6 @@ public class Launcher extends Activity {
 
     void updateWallpaperUi() {
         boolean custom = hasCustomWallpaper();
-        if (heroResetWp != null) heroResetWp.setVisibility(custom ? View.VISIBLE : View.GONE);
         if (wpSub != null) {
             wpSub.setText(custom
                     ? t("Imagen personalizada activa", "Custom image active")
@@ -543,16 +541,16 @@ public class Launcher extends Activity {
                 "Multitudes de NPCs", "Crowd NPCs",
                 "Desactivarlas mejora los FPS en zonas llenas como Shibuya",
                 "Disabling removes background crowds for higher FPS in cities",
-                new String[] {"0", "1"},
-                new String[] {"SÍ", "NO"},
-                new String[] {"ON", "OFF"}, 0, false));
+                new String[] {"1", "0"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 1, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_DISABLE_BLOOM",
                 "Post-procesado (Bloom)", "Bloom Post-Processing",
                 "Desactivarlo omite 12 pasadas de desenfoque HDR por frame",
                 "Disabling skips 12 HDR bloom blur passes per frame",
-                new String[] {"0", "1"},
-                new String[] {"SÍ", "NO"},
-                new String[] {"ON", "OFF"}, 0, false));
+                new String[] {"1", "0"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 1, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_REPLAY_THREAD",
                 "Hilo de replay asíncrono", "Async Replay Thread",
                 "Separa la grabación de comandos del replay de Vulkan (más FPS)",
@@ -580,16 +578,16 @@ public class Launcher extends Activity {
                 "Controles táctiles", "On-Screen Controls",
                 "Habilita o desactiva el mando virtual táctil",
                 "Enable or disable the virtual touchscreen overlay",
-                new String[] {"1", "0"},
-                new String[] {"SÍ", "NO"},
-                new String[] {"ON", "OFF"}, 0, false));
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 1, false));
         options.add(new Option(TAB_CONTROLS, "NX_TOUCH_HIDE",
-                "Visibilidad táctil", "Touch Visibility",
+                "Ocultar controles táctiles", "Hide Touch Controls",
                 "Oculta los gráficos táctiles manteniendo la entrada activa",
                 "Keep touch controls invisible while still accepting touches",
                 new String[] {"0", "1"},
-                new String[] {"VISIBLE", "OCULTO"},
-                new String[] {"VISIBLE", "HIDDEN"}, 0, false));
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
         options.add(new Option(TAB_CONTROLS, "NX_TOUCH_SIZE",
                 "Tamaño de botones", "Button Size",
                 "Escala de los botones virtuales en pantalla",
@@ -667,13 +665,13 @@ public class Launcher extends Activity {
         // LEFT COMMAND RAIL
         LinearLayout leftRail = buildLeftRail();
         foregroundRoot.addView(leftRail, new LinearLayout.LayoutParams(
-                dp(250), LinearLayout.LayoutParams.MATCH_PARENT));
+                dp(236), LinearLayout.LayoutParams.MATCH_PARENT));
 
         // RIGHT DYNAMIC STAGE
         FrameLayout rightStage = new FrameLayout(this);
         rightStage.setClipChildren(false);
         rightStage.setClipToPadding(false);
-        rightStage.setPadding(dp(22), dp(14), dp(22), dp(14));
+        rightStage.setPadding(dp(34), dp(14), dp(22), dp(14));
         foregroundRoot.addView(rightStage, new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
@@ -816,40 +814,18 @@ public class Launcher extends Activity {
         stLp.bottomMargin = dp(12);
         panel.addView(heroStatusCard, stLp);
 
-        // Bottom-right Action Row: Wallpaper chip(s) + Hero PLAY Slash Button
+        // Bottom-right Action Row: Hero PLAY Slash Button (Wallpaper controls live cleanly in FILES)
         LinearLayout bottomRow = new LinearLayout(this);
         bottomRow.setOrientation(LinearLayout.HORIZONTAL);
         bottomRow.setGravity(Gravity.END | Gravity.BOTTOM);
         bottomRow.setClipChildren(false);
-
-        P5Views.SlashButton wpBtn = new P5Views.SlashButton(this, t("FONDO", "WALLPAPER"), false, 44);
-        wpBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) { pick(PICK_WALLPAPER, "image/*", false); }
-        });
-        LinearLayout.LayoutParams wpLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
-        wpLp.rightMargin = dp(8);
-        wpLp.bottomMargin = dp(6);
-        bottomRow.addView(wpBtn, wpLp);
-
-        heroResetWp = new P5Views.SlashButton(this, t("RESET", "RESET"), false, 44);
-        heroResetWp.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) { resetLauncherWallpaper(); }
-        });
-        LinearLayout.LayoutParams rwLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
-        rwLp.rightMargin = dp(12);
-        rwLp.bottomMargin = dp(6);
-        bottomRow.addView(heroResetWp, rwLp);
 
         heroPlay = new P5Views.SlashButton(this, t("JUGAR", "PLAY"), true, 62);
         heroPlay.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) { onPlayClicked(); }
         });
-        LinearLayout.LayoutParams hpLp = new LinearLayout.LayoutParams(dp(236), dp(62));
+        LinearLayout.LayoutParams hpLp = new LinearLayout.LayoutParams(dp(248), dp(62));
         bottomRow.addView(heroPlay, hpLp);
 
         panel.addView(bottomRow, new LinearLayout.LayoutParams(
@@ -1099,7 +1075,8 @@ public class Launcher extends Activity {
             o.modalBtn = btn;
             row.addView(btn, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)));
         } else {
-            P5Views.SegmentedControl seg = new P5Views.SegmentedControl(this, labelsOf(o), o.pick,
+            boolean isOffOn = (o.labelsEn.length == 2 && "OFF".equals(o.labelsEn[0]));
+            P5Views.SegmentedControl seg = new P5Views.SegmentedControl(this, labelsOf(o), o.pick, isOffOn,
                     new P5Views.SegmentedControl.OnPickListener() {
                         @Override
                         public void onPick(int index) {

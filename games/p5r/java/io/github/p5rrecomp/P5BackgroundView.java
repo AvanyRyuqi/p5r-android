@@ -110,11 +110,11 @@ final class P5BackgroundView extends View {
     }
 
     private void rebuildStaticGeometry(int w, int h) {
-        // Left rail diagonal boundary: wider at top (~34%), tighter at bottom (~28%) for signature P5 slash
-        float railTopX = Math.min(w * 0.355f, P5Theme.dp(getContext(), 285));
-        float railBotX = Math.min(w * 0.295f, P5Theme.dp(getContext(), 238));
-        float seamW = P5Theme.dp(getContext(), 6.5f);
-        float redW = P5Theme.dp(getContext(), 4.0f);
+        // Left rail diagonal boundary: sits cleanly in the gutter between leftRail (236dp) and rightStage (+34dp pad)
+        float railTopX = Math.min(w * 0.305f, P5Theme.dp(getContext(), 252));
+        float railBotX = Math.min(w * 0.255f, P5Theme.dp(getContext(), 214));
+        float seamW = P5Theme.dp(getContext(), 6.0f);
+        float redW = P5Theme.dp(getContext(), 3.8f);
 
         railPath.reset();
         railPath.moveTo(0, 0);
@@ -201,26 +201,7 @@ final class P5BackgroundView extends View {
         p.setColor(P5Theme.INK_BLACK);
         c.drawPath(makeStar(cx, cy, 5, outerR * 0.30f, innerR * 0.28f, -18f), p);
 
-        // 4. Crisp angled ink slash shards sweeping through the star
-        p.setColor(P5Theme.INK_BLACK);
-        Path shard1 = new Path();
-        shard1.moveTo(w * 0.28f, h * 0.80f);
-        shard1.lineTo(w * 1.02f, h * 0.14f);
-        shard1.lineTo(w * 1.02f, h * 0.23f);
-        shard1.lineTo(w * 0.28f, h * 0.88f);
-        shard1.close();
-        c.drawPath(shard1, p);
-
-        p.setColor(P5Theme.PAPER_WHITE);
-        Path shardWhite = new Path();
-        shardWhite.moveTo(w * 0.30f, h * 0.89f);
-        shardWhite.lineTo(w * 1.02f, h * 0.24f);
-        shardWhite.lineTo(w * 1.02f, h * 0.265f);
-        shardWhite.lineTo(w * 0.30f, h * 0.915f);
-        shardWhite.close();
-        c.drawPath(shardWhite, p);
-
-        // Secondary sharp black accent wedge at top-right corner
+        // Sharp black accent wedge at top-right corner
         p.setColor(P5Theme.INK_BLACK);
         Path topCorner = new Path();
         topCorner.moveTo(w * 0.84f, 0);

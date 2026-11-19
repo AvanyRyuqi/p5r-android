@@ -398,15 +398,17 @@ final class P5Views {
 
         private String[] labels;
         private int selected = 0;
+        private final boolean offOnToggle;
         private OnPickListener listener;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path segPath = new Path();
 
-        SegmentedControl(Context context, String[] labels, int selected, OnPickListener listener) {
+        SegmentedControl(Context context, String[] labels, int selected, boolean offOnToggle, OnPickListener listener) {
             super(context);
             this.labels = labels;
             this.selected = selected;
+            this.offOnToggle = offOnToggle;
             this.listener = listener;
             setClickable(true);
             setFocusable(true);
@@ -488,13 +490,14 @@ final class P5Views {
                 float sl = pad + i * segW;
                 float sr = sl + segW + skew;
                 boolean act = (i == selected);
+                boolean actOff = act && offOnToggle && i == 0;
                 P5Theme.setSlantedQuad(segPath, sl, pad, sr, h - pad, skew, skew);
                 paint.setStyle(Paint.Style.FILL);
-                paint.setColor(act ? P5Theme.P5_RED : P5Theme.INK_ELEVATED);
+                paint.setColor(actOff ? Color.rgb(46, 46, 56) : (act ? P5Theme.P5_RED : P5Theme.INK_ELEVATED));
                 c.drawPath(segPath, paint);
 
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(1.5f * d);
+                paint.setStrokeWidth((act ? 1.8f : 1.3f) * d);
                 paint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.BORDER_SUBTLE);
                 c.drawPath(segPath, paint);
 
