@@ -44,6 +44,9 @@ struct GpuImage {
     bool hud = false;         // NX_HUD_1080: a 1280x720 render target made at 1920x1080 or 1600x900 (hud_1080_texture)
     bool shadow = false;      // NX_MALI_LOW_SHADOWS: 0.5x downscaled shadow depth map
     bool low_3d = false;      // NX_LOW_3D: 0.75x downscaled 3D render target (720x405)
+    bool bloom_cleared = false;     // cleared to black when NX_DISABLE_BLOOM skips P5R's blur passes
+    bool is_window_target = false;  // presented by gpu_present (only present_crop region is read)
+    int32_t present_crop_x = 0, present_crop_y = 0, present_crop_w = 0, present_crop_h = 0;
 };
 
 // NX_LOW_3D (nvn_image.cpp): 3D scene render targets (960x540) are created at 720x405 (0.75x, 480p) or 640x360 (0.667x, 360p)
@@ -235,6 +238,9 @@ void debug_hud_dump(uint64_t frame);
 // arms 1-frame draw trace + HUD texture dump + 2-frame presented PPM readback without file polling.
 void debug_arm_hotkey_trace();
 void debug_request_capture();
+// Replay-thread monotonic frame counter incremented at the end of gpu_present() / present_headless(),
+// so all submits belonging to one presented frame observe the same ID even under NX_REPLAY_THREAD=1.
+uint64_t replay_frame_id();
 
 // nvn_frames.cpp: submits that are not waited for (NX_PIPELINED, NX_ASYNC_GPU). Slots of command buffers, fences,
 // descriptor pool and ring stretch; retired (fences waited, write-backs copied if not yet) on reuse, when the ring is

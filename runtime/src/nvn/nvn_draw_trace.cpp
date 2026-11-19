@@ -444,23 +444,25 @@ void trace_draw(const Targets& t, uint32_t mode, bool indexed, const Cmd& c, con
     trace_cube_draw(t, vs, fs, tex_bindings, handles);
     frame_sig_draw(t, indexed, count, instances, fs, tex_bindings, handles);
     const uint64_t cur_f = g_frame.load(std::memory_order_relaxed);
+    const uint64_t cur_rf = replay_frame_id();
     static bool s_hotkey_armed = false;
     static uint64_t s_hotkey_min_frame = UINT64_MAX;
     static uint64_t s_hotkey_frame = UINT64_MAX;
     if (g_hotkey_trace_pending.load(std::memory_order_relaxed)) {
         if (g_hotkey_trace_pending.exchange(0, std::memory_order_acq_rel)) {
             s_hotkey_armed = true;
-            s_hotkey_min_frame = cur_f + 1;
+            s_hotkey_min_frame = cur_rf + 1;
         }
     }
-    // Latch onto the first frame >= s_hotkey_min_frame (handles g_frame advancing by >1 during dump_frames readback
-    // stalls under NX_REPLAY_THREAD=1).
-    if (s_hotkey_armed && cur_f >= s_hotkey_min_frame) {
+    // Latch onto the first replay frame >= s_hotkey_min_frame using replay_frame_id(), which only advances at the end
+    // of gpu_present() so all submits of the frame (including Submit 3 HUD/Phone draws) are captured intact.
+    if (s_hotkey_armed && cur_rf >= s_hotkey_min_frame) {
         s_hotkey_armed = false;
-        s_hotkey_frame = cur_f;
-        log("debug hotkey: tracing draws & dumping HUD textures on frame %llu", (unsigned long long)s_hotkey_frame);
+        s_hotkey_frame = cur_rf;
+        log("debug hotkey: tracing draws & dumping HUD textures on replay frame %llu (guest %llu)",
+            (unsigned long long)s_hotkey_frame, (unsigned long long)cur_f);
     }
-    const bool hk_active = (cur_f == s_hotkey_frame);
+    const bool hk_active = (cur_rf == s_hotkey_frame);
     const bool hud_due = hk_active || hud_dump_due(cur_f);
     bool hud_dump = false;
     if (hud_due) {
