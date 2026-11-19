@@ -171,23 +171,25 @@ GpuImage* image_of(uint64_t guest) {
     static const bool old_rule = std::getenv("NX_SHARE_NO_POOL_SWIZZLE") != nullptr;  // bisecting
     bool widened = t->format == 0x1 && t->pool_swizzle == 0x02010101u;
     if (share && t->memory && (old_rule ? t->pool_swizzle == 0 : !widened))
-        if (auto it = g_live_images.find(key); it != g_live_images.end())
+        if (auto it = g_live_images.find(key); it != g_live_images.end()) {
             if (auto shared = it->second.lock(); shared && shared->image && !shared->alpha_from_r &&
-                                                 !(shared->rendered && shared->retired)) {
+                                                 (shared->last_memory == 0 || shared->last_memory == t->memory) &&
+                                                 !(shared->retired && (shared->rendered || shared->texels))) {
                 if (shared->in_free_pool) claim_free_image(shared);
                 static uint64_t shares = 0;
                 if (++shares % 1000 == 1) log("nvn/vk: %llu textures shared an image with another", (unsigned long long)shares);
                 shared->retired = false;
+                shared->last_memory = t->memory;
                 t->image = shared;
                 // A texture made again over memory another live object still covers (or whose finalized owner was kept
-                // in defer_object / g_grave / g_free_images): compare a fast 192-byte sample hash of guest pool memory
-                // against what the image uploaded. If the bytes match (e.g. Quick Travel / Pause menu UI textures
-                // re-initialized at the same pool address), reuse the uploaded GpuImage with zero untiling and zero
-                // pass breaks; if the bytes differ (e.g. Shibuya streaming new foliage over a destroyed normal map,
-                // Issue #269), mark dirty so ensure_contents() re-uploads the new texels.
+                // in defer_object / g_grave / g_free_images): compare a content hash of guest pool memory against what
+                // the image uploaded. If the bytes match (e.g. Quick Travel / Pause menu UI textures re-initialized at
+                // the same pool address), reuse the uploaded GpuImage with zero untiling and zero pass breaks; if the
+                // bytes differ (e.g. Shibuya streaming new foliage over a destroyed normal map, Issue #269), mark dirty
+                // so ensure_contents() re-uploads the new texels.
                 static const bool keep = std::getenv("NX_SHARE_KEEP") != nullptr;
                 if (!keep && !shared->rendered) {
-                    const bool unchanged = !t->stride && t->memory && t->storage_size && shared->uploaded &&
+                    const bool unchanged = !t->stride && !shared->texels && t->memory && t->storage_size && shared->uploaded &&
                                            shared->upload_storage_size == t->storage_size &&
                                            shared->upload_sample_hash != 0 &&
                                            shared->upload_sample_hash ==
@@ -196,6 +198,8 @@ GpuImage* image_of(uint64_t guest) {
                 }
                 return shared.get();
             }
+            if (it->second.expired()) g_live_images.erase(it);
+        }
     if ((t->image = reuse_image(*t))) return t->image.get();
     auto img = std::make_shared<GpuImage>();
     img->format = bc_host_decode(t->format) ? bc_decoded_format(t->format) : vk_format(t->format);  // nvn_bc.cpp
@@ -328,6 +332,7 @@ GpuImage* image_of(uint64_t guest) {
         constexpr VkComponentSwizzle kSwizzle[] = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R,
                                                    VK_COMPONENT_SWIZZLE_G,    VK_COMPONENT_SWIZZLE_B,   VK_COMPONENT_SWIZZLE_A};
         pooled->swizzle = {kSwizzle[t->swizzle[0]], kSwizzle[t->swizzle[1]], kSwizzle[t->swizzle[2]], kSwizzle[t->swizzle[3]]};
+        pooled->last_memory = t->memory;
         t->image = pooled;
         if (t->memory) g_live_images[key] = pooled;
         return pooled.get();
@@ -358,6 +363,7 @@ GpuImage* image_of(uint64_t guest) {
         log("nvn/vk: image %llu for texture %llx (memory %llx): %ux%u x%u layers, %u levels, target %u format %#x -> %d",
             (unsigned long long)created, (unsigned long long)guest, (unsigned long long)t->memory,
             img->width, img->height, img->layers, img->levels, t->target, t->format, int(img->format));
+    img->last_memory = t->memory;
     t->image = img;
     if (t->memory) g_live_images[key] = img;
     return img.get();
