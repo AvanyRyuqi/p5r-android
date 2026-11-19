@@ -15,6 +15,7 @@
 #include "nvn_draw_state.h"
 #include "nvn_pipeline.h"
 #include "nvn_vk.h"
+#include "nvn_ultrawide.h"
 
 namespace nx::nvn {
 
@@ -132,6 +133,18 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     GpuImage* src = ensure_contents(cb, c.a[0]);
     GpuImage* dst = ensure_contents(cb, c.a[1]);
     if (!src || !dst) return;
+    // NX_ULTRAWIDE: widen guest 16:9 copy spans on widened render targets (e.g. P5R's DOF/bloom 240x135 -> 300x135
+    // copy and transition screen captures) BEFORE hud/low_3d scaling so copies never clip to the left 80%.
+    auto uw_rect = [](int32_t* r, const GpuImage& img, uint32_t level) {
+        const uint32_t limit = (img.hud || img.low_3d) ? UINT32_MAX : std::max(1u, img.width >> level);
+        int32_t x = r[0], w = r[3];
+        uw_span(x, w, limit);
+        r[0] = x, r[3] = std::max(1, w);
+    };
+    const uint32_t sl_pre = std::min(info.src_view.base_level, src->levels - 1);
+    const uint32_t dl_pre = std::min(info.dst_view.base_level, dst->levels - 1);
+    if (src->uw) uw_rect(info.src, *src, sl_pre);
+    if (dst->uw) uw_rect(info.dst, *dst, dl_pre);
     // NX_HUD_1080: a rectangle on a 1920x1080 image of a 1280x720 texture is taken 3/2 (the frame's copy into the
     // window texture: both scaled, a plain copy; one side only: a blit that scales).
     auto hud_rect = [](int32_t* r) {
