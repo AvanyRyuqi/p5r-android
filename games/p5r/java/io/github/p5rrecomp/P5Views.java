@@ -1,6 +1,9 @@
 package io.github.p5rrecomp;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Canvas;
@@ -12,8 +15,11 @@ import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -528,6 +534,7 @@ final class P5Views {
         private String key;
         private String value;
         private boolean accent;
+        private boolean pressed = false;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path poly = new Path();
@@ -537,6 +544,8 @@ final class P5Views {
             this.key = key;
             this.value = value;
             this.accent = accent;
+            setClickable(true);
+            setFocusable(true);
             textPaint.setTypeface(P5Theme.monoBold());
         }
 
@@ -545,6 +554,24 @@ final class P5Views {
             this.accent = accent;
             requestLayout();
             invalidate();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (!isEnabled()) return false;
+            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                pressed = true;
+                setScaleX(0.95f);
+                setScaleY(0.95f);
+                performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                invalidate();
+            } else if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
+                pressed = false;
+                setScaleX(1f);
+                setScaleY(1f);
+                invalidate();
+            }
+            return super.onTouchEvent(e);
         }
 
         @Override
@@ -572,12 +599,13 @@ final class P5Views {
 
             // Body
             P5Theme.setSlantedQuad(poly, 0, 0, w - 2.5f * d, h - 2.5f * d, skew, skew);
-            paint.setColor(accent ? P5Theme.PAPER_WHITE : P5Theme.INK_BLACK);
+            int bg = pressed ? P5Theme.P5_RED : (accent ? P5Theme.PAPER_WHITE : P5Theme.INK_BLACK);
+            paint.setColor(bg);
             c.drawPath(poly, paint);
 
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(1.5f * d);
-            paint.setColor(accent ? P5Theme.INK_BLACK : P5Theme.PAPER_WHITE);
+            paint.setColor(pressed ? P5Theme.PAPER_WHITE : (accent ? P5Theme.INK_BLACK : P5Theme.PAPER_WHITE));
             c.drawPath(poly, paint);
 
             textPaint.setTextSize(10.5f * d);
@@ -585,10 +613,10 @@ final class P5Views {
             Paint.FontMetrics fm = textPaint.getFontMetrics();
             float base = (h - 2.5f * d) * 0.5f - (fm.ascent + fm.descent) * 0.5f;
             float x = 10 * d;
-            textPaint.setColor(accent ? P5Theme.P5_RED : P5Theme.MUTED_TEXT);
+            textPaint.setColor(pressed ? P5Theme.ACID_YELLOW : (accent ? P5Theme.P5_RED : P5Theme.MUTED_TEXT));
             c.drawText(key, x, base, textPaint);
             x += textPaint.measureText(key) + 5 * d;
-            textPaint.setColor(accent ? P5Theme.INK_BLACK : P5Theme.PAPER_WHITE);
+            textPaint.setColor(pressed ? P5Theme.PAPER_WHITE : (accent ? P5Theme.INK_BLACK : P5Theme.PAPER_WHITE));
             c.drawText(value, x, base, textPaint);
         }
     }
@@ -630,14 +658,30 @@ final class P5Views {
             paint.setColor(P5Theme.P5_RED);
             c.drawPath(poly, paint);
 
-            // Title text in bold display italic
+            // Subtitle on right (measure first so long titles never collide with it)
+            float subReserve = 0f;
+            if (subtitle != null && !subtitle.isEmpty()) {
+                textPaint.setTypeface(P5Theme.monoBold());
+                textPaint.setTextSize(10.5f * d);
+                subReserve = textPaint.measureText(subtitle) + 14 * d;
+            }
+
+            // Title text in bold display italic (auto-fit if long)
+            String upper = title.toUpperCase(java.util.Locale.ROOT);
             textPaint.setTypeface(P5Theme.displayBold());
-            textPaint.setTextSize(21f * d);
+            float titleSize = 21f * d;
+            textPaint.setTextSize(titleSize);
+            float availW = Math.max(40 * d, w - 22 * d - subReserve);
+            float measured = textPaint.measureText(upper);
+            if (measured > availW) {
+                titleSize = Math.max(13f * d, titleSize * (availW / measured));
+                textPaint.setTextSize(titleSize);
+            }
             textPaint.setTextAlign(Paint.Align.LEFT);
             textPaint.setColor(P5Theme.PAPER_WHITE);
             Paint.FontMetrics fm = textPaint.getFontMetrics();
             float base = (h - 4 * d) * 0.5f - (fm.ascent + fm.descent) * 0.5f;
-            c.drawText(title.toUpperCase(java.util.Locale.ROOT), 17 * d, base, textPaint);
+            c.drawText(upper, 17 * d, base, textPaint);
 
             // Subtitle on right
             if (subtitle != null && !subtitle.isEmpty()) {
@@ -645,7 +689,9 @@ final class P5Views {
                 textPaint.setTextSize(10.5f * d);
                 textPaint.setTextAlign(Paint.Align.RIGHT);
                 textPaint.setColor(P5Theme.ACID_YELLOW);
-                c.drawText(subtitle, w - 6 * d, base, textPaint);
+                Paint.FontMetrics fmSub = textPaint.getFontMetrics();
+                float subBase = (h - 4 * d) * 0.5f - (fmSub.ascent + fmSub.descent) * 0.5f;
+                c.drawText(subtitle, w - 6 * d, subBase, textPaint);
             }
 
             // Sharp bottom cut rule
@@ -831,8 +877,6 @@ final class P5Views {
             super(context);
             setWillNotDraw(false);
             setOrientation(VERTICAL);
-            setClipChildren(false);
-            setClipToPadding(false);
             int padL = P5Theme.dpx(context, 22);
             int padT = P5Theme.dpx(context, 20);
             int padR = P5Theme.dpx(context, 26);
@@ -897,24 +941,37 @@ final class P5Views {
         void onPick(int index);
     }
 
-    static void showPickerDialog(Context ctx, String title, String[] labels, int current, final OnModalPick cb) {
+    private static void styleDialogWindow(Dialog dlg) {
+        Window win = dlg.getWindow();
+        if (win != null) {
+            win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams lp = win.getAttributes();
+            lp.dimAmount = 0.72f;
+            win.setAttributes(lp);
+        }
+    }
+
+    static void showPickerDialog(final Context ctx, String title, String[] labels, final int current, final OnModalPick cb) {
         final Dialog dlg = new Dialog(ctx);
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        if (dlg.getWindow() != null) {
-            dlg.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        }
+        styleDialogWindow(dlg);
         DialogFrameLayout frame = new DialogFrameLayout(ctx);
 
-        SectionHeaderView hdr = new SectionHeaderView(ctx, title, "");
-        frame.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 380), P5Theme.dpx(ctx, 42)));
+        int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
+        int screenH = ctx.getResources().getDisplayMetrics().heightPixels;
+        int contentW = Math.min(P5Theme.dpx(ctx, 390), screenW - P5Theme.dpx(ctx, 96));
+        int maxListH = Math.min(Math.round(screenH * 0.54f), P5Theme.dpx(ctx, 240));
 
-        ScrollView sc = new ScrollView(ctx);
+        SectionHeaderView hdr = new SectionHeaderView(ctx, title, "");
+        frame.addView(hdr, new LinearLayout.LayoutParams(contentW, P5Theme.dpx(ctx, 42)));
+
+        final ScrollView sc = new ScrollView(ctx);
         sc.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        sc.setVerticalFadingEdgeEnabled(true);
-        sc.setFadingEdgeLength(P5Theme.dpx(ctx, 16));
+        sc.setVerticalScrollBarEnabled(false);
         LinearLayout list = new LinearLayout(ctx);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, P5Theme.dpx(ctx, 10), 0, P5Theme.dpx(ctx, 6));
+        list.setPadding(0, P5Theme.dpx(ctx, 10), 0, P5Theme.dpx(ctx, 4));
 
         for (int i = 0; i < labels.length; i++) {
             final int idx = i;
@@ -933,12 +990,23 @@ final class P5Views {
         }
         sc.addView(list);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
-                P5Theme.dpx(ctx, 380), Math.min(P5Theme.dpx(ctx, 250), labels.length * P5Theme.dpx(ctx, 48) + P5Theme.dpx(ctx, 18)));
+                contentW, Math.min(maxListH, labels.length * P5Theme.dpx(ctx, 48) + P5Theme.dpx(ctx, 14)));
         frame.addView(sc, scLp);
 
         dlg.setContentView(frame);
         dlg.show();
         frame.playPopIn();
+
+        if (current > 0) {
+            sc.post(new Runnable() {
+                @Override
+                public void run() {
+                    int rowH = P5Theme.dpx(ctx, 48);
+                    int targetY = Math.max(0, current * rowH - sc.getHeight() / 2 + rowH / 2);
+                    sc.scrollTo(0, targetY);
+                }
+            });
+        }
     }
 
     // ---- 11. Custom P5 Styled Info / Confirm Dialog ----
@@ -949,13 +1017,14 @@ final class P5Views {
                                   String negLabel) {
         final Dialog dlg = new Dialog(ctx);
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        if (dlg.getWindow() != null) {
-            dlg.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        }
+        styleDialogWindow(dlg);
         DialogFrameLayout frame = new DialogFrameLayout(ctx);
 
+        int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
+        int contentW = Math.min(P5Theme.dpx(ctx, 430), screenW - P5Theme.dpx(ctx, 96));
+
         SectionHeaderView hdr = new SectionHeaderView(ctx, title, "");
-        frame.addView(hdr, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), P5Theme.dpx(ctx, 42)));
+        frame.addView(hdr, new LinearLayout.LayoutParams(contentW, P5Theme.dpx(ctx, 42)));
 
         TextView msg = new TextView(ctx);
         msg.setText(message);
@@ -964,7 +1033,7 @@ final class P5Views {
         msg.setTextSize(14);
         msg.setLineSpacing(P5Theme.dp(ctx, 3), 1f);
         msg.setPadding(P5Theme.dpx(ctx, 4), P5Theme.dpx(ctx, 12), P5Theme.dpx(ctx, 4), P5Theme.dpx(ctx, 16));
-        frame.addView(msg, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
+        frame.addView(msg, new LinearLayout.LayoutParams(contentW, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout actions = new LinearLayout(ctx);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -1002,10 +1071,251 @@ final class P5Views {
             }
         });
         actions.addView(pos, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, P5Theme.dpx(ctx, 40)));
-        frame.addView(actions, new LinearLayout.LayoutParams(P5Theme.dpx(ctx, 420), LinearLayout.LayoutParams.WRAP_CONTENT));
+        frame.addView(actions, new LinearLayout.LayoutParams(contentW, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         dlg.setContentView(frame);
         dlg.show();
         frame.playPopIn();
+    }
+
+    // ---- 12. Cold-Start Twin-Blade Diagonal Cut Intro Overlay (Option 1 + Subtle Chakeyy's Version) ----
+
+    static final class IntroOverlayView extends View {
+        private float progress = 0f; // 0..1 across ~620ms
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path bladePath = new Path();
+        private final Path edgePath = new Path();
+        private final Path starPath = new Path();
+        private final Path tickPath = new Path();
+        private ValueAnimator anim;
+
+        IntroOverlayView(Context context) {
+            super(context);
+            textPaint.setTypeface(P5Theme.monoBold());
+            textPaint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        void play() {
+            if (anim != null) anim.cancel();
+            progress = 0f;
+            anim = ValueAnimator.ofFloat(0f, 1f);
+            anim.setDuration(620);
+            anim.setInterpolator(new LinearInterpolator());
+            anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override
+                public void onAnimationUpdate(ValueAnimator a) {
+                    progress = (Float) a.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            anim.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    setVisibility(View.GONE);
+                    if (getParent() instanceof ViewGroup) {
+                        ((ViewGroup) getParent()).removeView(IntroOverlayView.this);
+                    }
+                }
+            });
+            anim.start();
+        }
+
+        private void buildStar(Path p, float cx, float cy, float outerR, float innerR) {
+            p.reset();
+            for (int i = 0; i < 10; i++) {
+                double a = Math.toRadians(-90.0 + i * 36.0);
+                float r = (i % 2 == 0) ? outerR : innerR;
+                float x = cx + (float) Math.cos(a) * r;
+                float y = cy + (float) Math.sin(a) * r;
+                if (i == 0) p.moveTo(x, y);
+                else p.lineTo(x, y);
+            }
+            p.close();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float d = P5Theme.dp(getContext(), 1f);
+
+            // Diagonal cut seam from top-right-of-center to bottom-left-of-center
+            float xTop = w * 0.59f;
+            float xBot = w * 0.41f;
+            float dx = xBot - xTop;
+            float dy = h;
+            float len = (float) Math.hypot(dx, dy);
+            // Unit perpendicular pointing down-right
+            float nx = dy / len;
+            float ny = -dx / len;
+
+            // Phase 1 split envelope (t = 0.42 -> 1.0)
+            float splitRaw = Math.max(0f, Math.min(1f, (progress - 0.42f) / 0.58f));
+            // Smooth cubic accelerate-out feel so the blades snap sharply open
+            float splitEase = splitRaw * splitRaw * (1.8f - 0.8f * splitRaw);
+            if (splitEase > 1f) splitEase = 1f;
+            float maxSlide = (float) Math.hypot(w, h) * 0.68f;
+            float slide = maxSlide * splitEase;
+            float redW = 11f * d;
+            float whiteW = 3f * d;
+
+            // Left / Top diagonal blade (slides up-left)
+            c.save();
+            c.translate(-nx * slide, -ny * slide);
+            bladePath.reset();
+            bladePath.moveTo(-w, -h);
+            bladePath.lineTo(xTop, -h);
+            bladePath.lineTo(xTop, 0);
+            bladePath.lineTo(xBot, h);
+            bladePath.lineTo(xBot, h * 2f);
+            bladePath.lineTo(-w, h * 2f);
+            bladePath.close();
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(bladePath, paint);
+
+            if (splitRaw > 0.001f) {
+                // Bold P5 crimson + crisp white inner blade edge
+                edgePath.reset();
+                edgePath.moveTo(xTop - nx * redW, 0 - ny * redW);
+                edgePath.lineTo(xTop, 0);
+                edgePath.lineTo(xBot, h);
+                edgePath.lineTo(xBot - nx * redW, h - ny * redW);
+                edgePath.close();
+                paint.setColor(P5Theme.P5_RED);
+                c.drawPath(edgePath, paint);
+
+                edgePath.reset();
+                edgePath.moveTo(xTop - nx * whiteW, 0 - ny * whiteW);
+                edgePath.lineTo(xTop, 0);
+                edgePath.lineTo(xBot, h);
+                edgePath.lineTo(xBot - nx * whiteW, h - ny * whiteW);
+                edgePath.close();
+                paint.setColor(P5Theme.PAPER_WHITE);
+                c.drawPath(edgePath, paint);
+            }
+            c.restore();
+
+            // Right / Bottom diagonal blade (slides down-right)
+            c.save();
+            c.translate(nx * slide, ny * slide);
+            bladePath.reset();
+            bladePath.moveTo(xTop, -h);
+            bladePath.lineTo(w * 2f, -h);
+            bladePath.lineTo(w * 2f, h * 2f);
+            bladePath.lineTo(xBot, h * 2f);
+            bladePath.lineTo(xBot, h);
+            bladePath.lineTo(xTop, 0);
+            bladePath.close();
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(bladePath, paint);
+
+            if (splitRaw > 0.001f) {
+                edgePath.reset();
+                edgePath.moveTo(xTop, 0);
+                edgePath.lineTo(xTop + nx * redW, 0 + ny * redW);
+                edgePath.lineTo(xBot + nx * redW, h + ny * redW);
+                edgePath.lineTo(xBot, h);
+                edgePath.close();
+                paint.setColor(P5Theme.P5_RED);
+                c.drawPath(edgePath, paint);
+
+                edgePath.reset();
+                edgePath.moveTo(xTop, 0);
+                edgePath.lineTo(xTop + nx * whiteW, 0 + ny * whiteW);
+                edgePath.lineTo(xBot + nx * whiteW, h + ny * whiteW);
+                edgePath.lineTo(xBot, h);
+                edgePath.close();
+                paint.setColor(P5Theme.PAPER_WHITE);
+                c.drawPath(edgePath, paint);
+            }
+            c.restore();
+
+            // Razor-thin seam flash right before the blades part (t = 0.34 -> 0.46)
+            if (progress >= 0.34f && progress <= 0.46f) {
+                float f = 1f - Math.abs((progress - 0.40f) / 0.06f);
+                int flashA = Math.round(255 * Math.max(0f, Math.min(1f, f)));
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(3.5f * d);
+                paint.setColor(Color.argb(flashA, 246, 245, 240));
+                c.drawLine(xTop, 0, xBot, h, paint);
+            }
+
+            // Center P5 Star emblem + subtle "CHAKEYY'S VERSION" stamp (t = 0.0 -> 0.56)
+            if (progress < 0.56f) {
+                float emblemAlpha;
+                float starScale;
+                if (progress < 0.22f) {
+                    float u = progress / 0.22f;
+                    float ease = 1f - (1f - u) * (1f - u);
+                    starScale = 0.72f + 0.32f * ease; // 0.72 -> 1.04
+                    emblemAlpha = Math.min(1f, u * 1.4f);
+                } else if (progress < 0.38f) {
+                    float u = (progress - 0.22f) / 0.16f;
+                    starScale = 1.04f - 0.04f * u; // settle to 1.0
+                    emblemAlpha = 1f;
+                } else {
+                    float u = (progress - 0.38f) / 0.18f;
+                    starScale = 1.0f + 0.14f * u;
+                    emblemAlpha = Math.max(0f, 1f - u);
+                }
+
+                float cx = w * 0.5f;
+                float cy = h * 0.44f;
+                float outerR = Math.min(w, h) * 0.175f;
+                float innerR = outerR * 0.42f;
+                int a = Math.round(255 * emblemAlpha);
+
+                c.save();
+                c.translate(cx, cy);
+                c.scale(starScale, starScale);
+                c.rotate(-18f);
+
+                // Sharp paper-white offset drop layer
+                buildStar(starPath, 4.5f * d, 4.5f * d, outerR, innerR);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(a, 246, 245, 240));
+                c.drawPath(starPath, paint);
+
+                // Bold P5 crimson star
+                buildStar(starPath, 0, 0, outerR, innerR);
+                paint.setColor(Color.argb(a, 228, 0, 18));
+                c.drawPath(starPath, paint);
+
+                // Crisp white outline
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(2.6f * d);
+                paint.setColor(Color.argb(a, 246, 245, 240));
+                c.drawPath(starPath, paint);
+
+                // Inner ink core cutout
+                buildStar(starPath, 0, 0, outerR * 0.46f, innerR * 0.46f);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(a, 10, 10, 12));
+                c.drawPath(starPath, paint);
+                c.restore();
+
+                // Subtle "CHAKEYY'S VERSION" stamp underneath (appears cleanly after star punch)
+                float tagFade = Math.max(0f, Math.min(1f, (progress - 0.08f) / 0.14f)) * emblemAlpha;
+                if (tagFade > 0.01f) {
+                    String tag = "CHAKEYY'S VERSION";
+                    textPaint.setTextSize(10.5f * d);
+                    float tw = textPaint.measureText(tag);
+                    float ty = cy + outerR + 26f * d;
+
+                    // Tiny slanted crimson tick just left of the subtle signature
+                    float tickL = cx - tw * 0.5f - 12f * d;
+                    P5Theme.setSlantedQuad(tickPath, tickL, ty - 8.5f * d, tickL + 6f * d, ty + 1f * d, 2.5f * d, 2.5f * d);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(Color.argb(Math.round(230 * tagFade), 228, 0, 18));
+                    c.drawPath(tickPath, paint);
+
+                    textPaint.setColor(Color.argb(Math.round(200 * tagFade), 246, 245, 240));
+                    c.drawText(tag, cx + 3f * d, ty, textPaint);
+                }
+            }
+        }
     }
 }

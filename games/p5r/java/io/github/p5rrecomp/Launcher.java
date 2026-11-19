@@ -126,6 +126,7 @@ public class Launcher extends Activity {
     private P5Views.SegmentedControl wpDimSeg;
 
     private Bitmap currentWallpaperBmp;
+    private boolean hasPausedOnce = false;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
@@ -444,8 +445,14 @@ public class Launcher extends Activity {
         }
         hideSystemBars();
         initOptions();
-        buildUi();
+        buildUi(state == null);
         loadWallpaper();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        hasPausedOnce = true;
     }
 
     @Override
@@ -453,6 +460,9 @@ public class Launcher extends Activity {
         super.onResume();
         hideSystemBars();
         refresh();
+        if (hasPausedOnce && bgView != null) {
+            bgView.triggerSlash();
+        }
     }
 
     @Override
@@ -649,7 +659,7 @@ public class Launcher extends Activity {
 
     // ---- UI construction (Direction A: P5 Pause / Calling Card) ----
 
-    private void buildUi() {
+    private void buildUi(boolean playIntro) {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(P5Theme.INK_BLACK);
 
@@ -709,6 +719,16 @@ public class Launcher extends Activity {
             tabPanels[i].setVisibility(i == TAB_PLAY ? View.VISIBLE : View.GONE);
             rightStage.addView(tabPanels[i], new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+
+        if (playIntro) {
+            final P5Views.IntroOverlayView intro = new P5Views.IntroOverlayView(this);
+            root.addView(intro, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            intro.post(new Runnable() {
+                @Override
+                public void run() { intro.play(); }
+            });
         }
 
         setContentView(root);
@@ -802,11 +822,11 @@ public class Launcher extends Activity {
         specBar.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         specBar.setClipChildren(false);
 
-        specRes = addSpecBadge(specBar, "RES", "540P", true);
-        specView = addSpecBadge(specBar, "VIEW", "16:9", false);
-        specFps = addSpecBadge(specBar, "FPS", "30", false);
-        specGfx = addSpecBadge(specBar, "GFX", "LOW", false);
-        specExtra = addSpecBadge(specBar, "FSR", "OFF", false);
+        specRes = addSpecBadge(specBar, "RES", "540P", true, TAB_DISPLAY);
+        specView = addSpecBadge(specBar, "VIEW", "16:9", false, TAB_DISPLAY);
+        specFps = addSpecBadge(specBar, "FPS", "30", false, TAB_PERFORMANCE);
+        specGfx = addSpecBadge(specBar, "GFX", "LOW", false, TAB_PERFORMANCE);
+        specExtra = addSpecBadge(specBar, "FSR", "OFF", false, TAB_DISPLAY);
         panel.addView(specBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -856,8 +876,12 @@ public class Launcher extends Activity {
         return panel;
     }
 
-    private P5Views.SpecBadge addSpecBadge(LinearLayout bar, String key, String val, boolean accent) {
+    private P5Views.SpecBadge addSpecBadge(LinearLayout bar, String key, String val, boolean accent, final int targetTab) {
         P5Views.SpecBadge b = new P5Views.SpecBadge(this, key, val, accent);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { selectTab(targetTab, true); }
+        });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(28));
         lp.leftMargin = dp(6);
@@ -878,8 +902,6 @@ public class Launcher extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setClipToPadding(false);
-        scroll.setVerticalFadingEdgeEnabled(true);
-        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));
@@ -907,8 +929,6 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        scroll.setVerticalFadingEdgeEnabled(true);
-        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));
@@ -951,8 +971,6 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        scroll.setVerticalFadingEdgeEnabled(true);
-        scroll.setFadingEdgeLength(dp(16));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(2), 0, dp(16));

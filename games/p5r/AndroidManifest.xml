@@ -33,7 +33,7 @@
         <activity
             android:name=".Launcher"
             android:exported="true"
-            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:theme="@style/P5LauncherTheme"
             android:screenOrientation="sensorLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -47,7 +47,7 @@
             android:name=".ImportActivity"
             android:exported="false"
             android:process=":import"
-            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:theme="@style/P5LauncherTheme"
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
         <!-- Where the on-screen controls go (NX_TOUCH_LAYOUT), full screen like the game. -->
