@@ -1,10 +1,8 @@
 package io.github.p5rrecomp;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ShortcutInfo;
@@ -13,7 +11,6 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
@@ -23,10 +20,15 @@ import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.system.Os;
+import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.WindowManager;
-import android.widget.Button;
+import android.view.animation.DecelerateInterpolator;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -34,8 +36,8 @@ import android.widget.Toast;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -46,59 +48,91 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The home screen in front of the game (a NativeActivity, libp5r.so): checks for the player's data in Internal
- * storage/Persona 5 Royal (asking for all-files access), shows the options and writes them to that folder's
- * config.txt, whose NX_* lines the runtime turns into its switches:
- *   game text   the language of the game's texts and subtitles (language=auto, default: the device's, English when
- *               the game lacks it; or en-US, es, fr, de, it, ja, ko, zh-Hans, zh-Hant). The voices are the game's own
- *               option.
- *   resolution  720p (NX_HANDHELD=1, default) or 1080p (NX_HANDHELD=0)
- *   interface   at 720p (NX_HUD_1080=0, default: faster) or, in 720p, drawn at 1080p (NX_HUD_1080=1: sharper text)
- *   graphics    low (default), medium or high: textures one mip smaller (NX_LOD_BIAS=1), half a mip, or the game's
- *               own. (A lower render resolution needs the engine's target sizes: games/p5r/PROGRESO.md.)
- *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
- *   FPS counter off (default) or on (NX_SHOW_FPS)
- *   shadows     off (NX_SHADOWS=0, default: the shadow maps are not drawn, ~9% of the GPU on the 3D title) or on
- *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
- *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
- * and imports or exports the saves (user/save, SaveFiles.java): a ZIP or a folder in, a ZIP in Download out.
- * The game: the player picks their own NSP or XCI (Persona 5 Royal 1.0.0) and prod.keys here; ImportActivity checks
- * them and translates the game's shaders once, and every start reads the game from that file as it is (the runtime's
- * game_image.cpp, through NX_GAME_FD / NX_GAME_NAME / NX_KEYS). Nothing of the game is copied but its shaders. A data
- * folder made on a PC (exefs/ or analysis/, extract/romfs, spirv/) still works when no file was picked.
- * The icon: a home screen shortcut with a picture of the player's own (Android lets an app pin shortcuts, not change
- * its own icon).
- * Other lines of config.txt are kept as they were. The launcher itself speaks the device's language (Lang.java:
- * Spanish, English, French, German, Italian, Portuguese, Japanese, Korean, Chinese; English otherwise).
+ * Persona 5 Royal Android Launcher — Reworked Landscape Command Deck (Direction A: P5 Pause / Calling Card).
+ * Preserves 100% compatibility with config.txt, SaveFiles, ImportActivity, ControlsEditor, Lang, and NativeActivity.
  */
 public class Launcher extends Activity {
     static final String DATA = "Persona 5 Royal";
 
-    static final class Option {
-        final String key, es, en;
-        final String[] values, labelsEs, labelsEn;
-        int pick;
+    static final int TAB_PLAY = 0;
+    static final int TAB_DISPLAY = 1;
+    static final int TAB_PERFORMANCE = 2;
+    static final int TAB_CONTROLS = 3;
+    static final int TAB_FILES = 4;
+    static final int TAB_COUNT = 5;
 
-        Option(String key, String es, String en, String[] values, String[] labelsEs, String[] labelsEn, int pick) {
+    static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4,
+            PICK_ICON = 5, PREPARE = 6, PICK_CPK = 7, PICK_DRIVER = 8, PICK_WALLPAPER = 9;
+
+    static final class Option {
+        final int tab;
+        final String key, es, en;
+        final String descEs, descEn;
+        final String[] values, labelsEs, labelsEn;
+        final boolean modal;
+        int pick;
+        View rowView;
+        P5Views.SegmentedControl segView;
+        P5Views.SlashButton modalBtn;
+
+        Option(int tab, String key, String es, String en, String descEs, String descEn,
+               String[] values, String[] labelsEs, String[] labelsEn, int pick, boolean modal) {
+            this.tab = tab;
             this.key = key;
             this.es = es;
             this.en = en;
+            this.descEs = descEs;
+            this.descEn = descEn;
             this.values = values;
             this.labelsEs = labelsEs;
             this.labelsEn = labelsEn;
             this.pick = pick;
+            this.modal = modal;
         }
     }
 
     final List<Option> options = new ArrayList<>();
     final Map<String, String> config = new LinkedHashMap<>();
-    TextView status;
-    Button play;
-    static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4, PICK_ICON = 5, PREPARE = 6, PICK_CPK = 7, PICK_DRIVER = 8;
+
+    private P5BackgroundView bgView;
+    private LinearLayout foregroundRoot;
+    private final P5Views.NavTabView[] navTabs = new P5Views.NavTabView[TAB_COUNT];
+    private final View[] tabPanels = new View[TAB_COUNT];
+    private int activeTab = TAB_PLAY;
+
+    // Hybrid PLAY buttons: heroPlay shown on TAB_PLAY, pinnedPlay shown on Settings tabs
+    private P5Views.SlashButton heroPlay;
+    private P5Views.SlashButton pinnedPlay;
+    private P5Views.SlashButton heroResetWp;
+    private TextView railStatusText;
+    private TextView heroStatusTitle;
+    private TextView heroStatusBody;
+    private P5Views.AngledRowLayout heroStatusCard;
+
+    // Live spec badges on Home screen
+    private P5Views.SpecBadge specRes;
+    private P5Views.SpecBadge specView;
+    private P5Views.SpecBadge specFps;
+    private P5Views.SpecBadge specGfx;
+    private P5Views.SpecBadge specExtra;
+
+    // Live file-status subtitles on Files tab
+    private TextView gameSub;
+    private TextView keysSub;
+    private TextView driverSub;
+    private TextView wpSub;
+
+    private Bitmap currentWallpaperBmp;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
     String label(Option o) { return t(o.labelsEs[o.pick], o.labelsEn[o.pick]); }
+
+    String[] labelsOf(Option o) {
+        String[] out = new String[o.values.length];
+        for (int i = 0; i < o.values.length; i++) out[i] = t(o.labelsEs[i], o.labelsEn[i]);
+        return out;
+    }
 
     Option findOption(String key) {
         for (Option o : options) {
@@ -117,12 +151,13 @@ public class Launcher extends Activity {
 
     boolean hasAccess() {
         if (Build.VERSION.SDK_INT < 30) {
-            return checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            return checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
         }
         return Api30Helper.isExternalStorageManager();
     }
 
-    // ---- the game file, read in place at every start ----
+    // ---- game file & keys ----
 
     SharedPreferences prefs() { return getSharedPreferences("game", MODE_PRIVATE); }
 
@@ -142,7 +177,6 @@ public class Launcher extends Activity {
         }
     }
 
-    // The shaders were translated from this game file (ImportActivity writes spirv/import.txt last).
     boolean prepared() {
         File note = new File(dataDir(), "spirv/import.txt");
         if (!note.canRead()) return false;
@@ -181,18 +215,19 @@ public class Launcher extends Activity {
         }
         try {
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (Exception ignored) {  // a provider without persistable grants: works while the app runs
+        } catch (Exception ignored) {
         }
         prefs().edit().putString("uri", uri.toString()).putString("name", name).apply();
     }
 
-    // prod.keys (and title.keys, when the dump needs it): copied into the app's own storage, never shared or logged.
     void onKeysPicked(Intent data) {
         List<Uri> uris = new ArrayList<>();
         ClipData clip = data.getClipData();
-        if (clip != null)
+        if (clip != null) {
             for (int k = 0; k < clip.getItemCount(); k++) uris.add(clip.getItemAt(k).getUri());
-        else if (data.getData() != null) uris.add(data.getData());
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
         boolean prod = false;
         for (Uri uri : uris) {
             String name = displayName(uri).toLowerCase(Locale.ROOT);
@@ -212,10 +247,11 @@ public class Launcher extends Activity {
             } catch (Exception ignored) {
             }
         }
-        if (!prod && !hasKeys())
+        if (!prod && !hasKeys()) {
             tell(t("Claves no válidas", "Not a keys file"),
                     t("Ese archivo no tiene las claves (header_key). Elige el prod.keys de tu consola.",
                             "That file has no keys (header_key). Choose your console's prod.keys."));
+        }
     }
 
     void prepare() {
@@ -225,7 +261,6 @@ public class Launcher extends Activity {
         startActivityForResult(i, PREPARE);
     }
 
-    // The runtime reads the game from this descriptor (same process: the NativeActivity runs in the launcher's).
     boolean openGameForRuntime() {
         try {
             ParcelFileDescriptor f = getContentResolver().openFileDescriptor(Uri.parse(gameUri()), "r");
@@ -241,8 +276,6 @@ public class Launcher extends Activity {
         }
     }
 
-    // A home screen shortcut with the player's picture (cropped to a square; an adaptive icon, so the home screen gives
-    // it its own shape).
     void onIconPicked(Uri uri) {
         try {
             Bitmap src;
@@ -264,22 +297,94 @@ public class Launcher extends Activity {
                     .setShortLabel("P5R").setLongLabel("Persona 5 Royal").setIcon(Icon.createWithAdaptiveBitmap(icon))
                     .setIntent(launch).build();
             sm.requestPinShortcut(info, null);
-            tell(t("Icono", "Icon"), t("Acepta el aviso para poner el acceso directo con tu imagen en la pantalla de inicio. "
-                            + "El icono del cajón de apps no cambia: Android no deja que una app cambie el suyo.",
-                    "Accept the prompt to put the shortcut with your picture on the home screen. The icon in the app "
-                            + "drawer stays: Android does not let an app change its own."));
+            tell(t("Icono", "Icon"), t("Acepta el aviso para poner el acceso directo con tu imagen en la pantalla de inicio.",
+                    "Accept the prompt to pin the shortcut with your picture to your home screen."));
         } catch (Exception e) {
             tell(t("Icono", "Icon"), t("No se pudo usar esa imagen.", "That picture could not be used."));
         }
     }
 
-    // The recompiled build reads analysis/main.bin, the native one (the game's own code) exefs/main.
+    // ---- custom launcher wallpaper ----
+
+    File wallpaperFile() { return new File(getFilesDir(), "launcher_wallpaper.jpg"); }
+
+    boolean hasCustomWallpaper() { return wallpaperFile().length() > 0; }
+
+    void loadWallpaper() {
+        File f = wallpaperFile();
+        if (!f.canRead()) {
+            if (currentWallpaperBmp != null) {
+                currentWallpaperBmp.recycle();
+                currentWallpaperBmp = null;
+            }
+            if (bgView != null) bgView.setWallpaper(null);
+            return;
+        }
+        try {
+            Bitmap bmp = BitmapFactory.decodeFile(f.getPath());
+            if (currentWallpaperBmp != null && currentWallpaperBmp != bmp) currentWallpaperBmp.recycle();
+            currentWallpaperBmp = bmp;
+            if (bgView != null) bgView.setWallpaper(bmp);
+        } catch (Exception ignored) {
+        }
+    }
+
+    void onWallpaperPicked(Uri uri) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                BitmapFactory.decodeStream(in, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                throw new IllegalArgumentException("unreadable image");
+            }
+            int sample = 1;
+            while ((bounds.outWidth / sample) > 2048 || (bounds.outHeight / sample) > 2048) sample *= 2;
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            Bitmap decoded;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                decoded = BitmapFactory.decodeStream(in, null, opts);
+            }
+            if (decoded == null) throw new IllegalArgumentException("decode failed");
+            File dest = wallpaperFile();
+            try (OutputStream out = new FileOutputStream(dest)) {
+                decoded.compress(Bitmap.CompressFormat.JPEG, 92, out);
+            }
+            decoded.recycle();
+            loadWallpaper();
+            updateWallpaperUi();
+            Toast.makeText(this, t("Fondo aplicado", "Wallpaper applied"), Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            tell(t("Fondo de pantalla", "Wallpaper"),
+                    t("No se pudo cargar esa imagen.", "Could not load that image."));
+        }
+    }
+
+    void clearWallpaper() {
+        wallpaperFile().delete();
+        loadWallpaper();
+        updateWallpaperUi();
+        Toast.makeText(this, t("Fondo P5 restaurado", "Default P5 art restored"), Toast.LENGTH_SHORT).show();
+    }
+
+    void updateWallpaperUi() {
+        boolean custom = hasCustomWallpaper();
+        if (heroResetWp != null) heroResetWp.setVisibility(custom ? View.VISIBLE : View.GONE);
+        if (wpSub != null) {
+            wpSub.setText(custom
+                    ? t("Imagen personalizada activa", "Custom image active")
+                    : t("Arte P5 por defecto", "Default P5 procedural art"));
+        }
+    }
+
+    // ---- data validation ----
+
     boolean hasData() {
         return new File(dataDir(), "exefs/main").canRead() || new File(dataDir(), "analysis/main.bin").canRead();
     }
 
-    // The build ID the port is made for (Persona 5 Royal 1.0.0, the base game): the start of exefs/main's module ID
-    // (NSO header +0x40). The native build refuses another (runtime main.cpp); say so here instead of closing.
     static final String[] KNOWN_BUILDS = {
         "708BCACA873EA32B",  // US
         "B78A03E489E5BD92",  // EU
@@ -287,7 +392,6 @@ public class Launcher extends Activity {
         "2F2253ACD6BE5D87"   // Asia
     };
 
-    // Null when exefs/main is missing or a recognized base game version, else its build ID.
     String wrongBuild() {
         File main = new File(dataDir(), "exefs/main");
         if (!main.canRead()) return null;
@@ -307,363 +411,855 @@ public class Launcher extends Activity {
         return have;
     }
 
+    // ---- lifecycle ----
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        // The game's texts and subtitles (runtime language.h): its own language names, as a console lists them.
-        options.add(new Option("language", "Idioma de textos y subtítulos", "Text and subtitle language",
-                new String[] {"auto", "en-US", "es", "fr", "de", "it", "ja", "ko", "zh-Hans", "zh-Hant"},
-                new String[] {"Automático (idioma del dispositivo)", "English", "Español", "Français", "Deutsch",
-                        "Italiano", "日本語", "한국어", "简体中文", "繁體中文"},
-                new String[] {"Automatic (device language)", "English", "Español", "Français", "Deutsch", "Italiano",
-                        "日本語", "한국어", "简体中文", "繁體中文"}, 0));
-        options.add(new Option("RESOLUTION", "Resolución", "Resolution",
-                new String[] {"360p", "480p", "540p", "720p", "1080p"},
-                new String[] {"360p", "480p", "540p", "720p", "1080p"},
-                new String[] {"360p", "480p", "540p", "720p", "1080p"}, 3));
-        options.add(new Option("NX_STRETCH", "Pantalla completa (estirar)", "Fullscreen (stretch)",
-                new String[] {"0", "1"},
-                new String[] {"Desactivada", "Activada"},
-                new String[] {"Off", "On"}, 0));
-        options.add(new Option("NX_ULTRAWIDE", "Pantalla ancha real (Hor+)", "True Widescreen (Hor+)",
-                new String[] {"0", "1"},
-                new String[] {"Desactivada", "Activada (más FOV horizontal)"},
-                new String[] {"Off", "On (extra horizontal FOV)"}, 0));
-        options.add(new Option("NX_UW_STRETCH_UI", "Estirar UI a pantalla completa (Hor+)", "Stretch full width UI (Hor+)",
-                new String[] {"0", "1"},
-                new String[] {"Normal (16:9)", "Estirar a pantalla completa"},
-                new String[] {"Normal (16:9)", "Stretch full width"}, 0));
-        options.add(new Option("NX_FSR", "Superresolución (FSR 1.0)", "Super resolution (FSR 1.0)",
-                new String[] {"0", "1"},
-                new String[] {"Desactivada", "Activada"},
-                new String[] {"Off", "On"}, 0));
-        options.add(new Option("NX_HUD_1080", "Interfaz", "Interface", new String[] {"0", "1"},
-                new String[] {"720p (más rápida)", "1080p (textos nítidos)"},
-                new String[] {"720p (faster)", "1080p (sharp text)"}, 0));
-        options.add(new Option("GRAPHICS", "Gráficos", "Graphics", new String[] {"low", "medium", "high"},
-                new String[] {"Bajos", "Medios", "Altos"}, new String[] {"Low", "Medium", "High"}, 0));
-        options.add(new Option("NX_FPS_CAP", "Fotogramas por segundo", "Frame rate", new String[] {"30", "60"},
-                new String[] {"30 fps", "60 fps (experimental)"}, new String[] {"30 fps", "60 fps (experimental)"}, 0));
-        options.add(new Option("NX_SHADOWS", "Sombras", "Shadows", new String[] {"0", "1"},
-                new String[] {"Desactivadas", "Activadas"}, new String[] {"Off", "On"}, 0));
-        options.add(new Option("NX_MALI_LOW_SHADOWS", "Calidad de sombras", "Shadow quality",
-                new String[] {"1", "0"},
-                new String[] {"Baja (0.5x - mejor rendimiento)", "Original (1.0x)"},
-                new String[] {"Low (0.5x - best performance)", "Original (1.0x)"}, 0));
-        options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
-                new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
-        options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
-                new String[] {"Activados", "Desactivados"}, new String[] {"On", "Off"}, 0));
-        options.add(new Option("NX_TOUCH_HIDE", "Ocultar controles", "Hide controls", new String[] {"0", "1"},
-                new String[] {"No (visibles)", "Sí (invisibles)"}, new String[] {"No (visible)", "Yes (invisible)"}, 0));
-        options.add(new Option("NX_TOUCH_SIZE", "Tamaño de los botones", "Button size",
-                new String[] {"80", "100", "125"}, new String[] {"Pequeño", "Normal", "Grande"},
-                new String[] {"Small", "Normal", "Large"}, 1));
-        options.add(new Option("NX_TOUCH_OPACITY", "Opacidad de los botones", "Button opacity",
-                new String[] {"50", "85", "100"}, new String[] {"Baja", "Normal", "Alta"},
-                new String[] {"Low", "Normal", "High"}, 1));
-        options.add(new Option("NX_NO_CROWD", "Gente / Multitudes de NPCs", "Crowd NPCs",
-                new String[] {"0", "1"},
-                new String[] {"Activada (normal)", "Desactivada (más FPS)"},
-                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 0));
-        options.add(new Option("NX_DISABLE_BLOOM", "Post-procesado (bloom/brillo)", "Post-processing (bloom)",
-                new String[] {"0", "1"},
-                new String[] {"Activado (normal)", "Desactivado (más FPS)"},
-                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 0));
-        options.add(new Option("NX_REPLAY_THREAD", "Hilo de replay asíncrono", "Async replay thread",
-                new String[] {"0", "1"},
-                new String[] {"Desactivado", "Activado (más FPS)"},
-                new String[] {"Off", "On (more FPS)"}, 0));
-        options.add(new Option("NX_ENABLE_LOG", "Registro de depuración (nx.log)", "Debug logging (nx.log)",
-                new String[] {"0", "1"},
-                new String[] {"Desactivado (más FPS)", "Activado"},
-                new String[] {"Off (more FPS)", "On"}, 0));
-        options.add(new Option("NX_GAMEPAD_LAYOUT", "Botones del mando físico", "Physical gamepad buttons",
-                new String[] {"0", "1"},
-                new String[] {"Nintendo (A dcha, B abajo)", "Xbox / PC (A abajo, B dcha)"},
-                new String[] {"Nintendo (A right, B down)", "Xbox / PC (A down, B right)"}, 0));
-        options.add(new Option("NX_STICK_SENSITIVITY", "Sensibilidad palanca táctil", "Touch stick sensitivity",
-                new String[] {"50", "75", "100", "125", "150", "200"},
-                new String[] {"50%", "75%", "100%", "125%", "150%", "200%"},
-                new String[] {"50%", "75%", "100%", "125%", "150%", "200%"}, 2));
-        options.add(new Option("NX_CAMERA_SENSITIVITY", "Sensibilidad cámara táctil", "Touch camera sensitivity",
-                new String[] {"50", "75", "100", "125", "150", "200", "250"},
-                new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"},
-                new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"}, 2));
-        build();
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        hideSystemBars();
+        initOptions();
+        buildUi();
+        loadWallpaper();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        hideSystemBars();
         refresh();
     }
 
-    void build() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(20, 4, 6));
-        int pad = dp(24);
-        root.setPadding(pad, pad, pad, pad);
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (currentWallpaperBmp != null) {
+            currentWallpaperBmp.recycle();
+            currentWallpaperBmp = null;
+        }
+    }
 
-        TextView title = new TextView(this);
-        title.setText("PERSONA 5 ROYAL");
-        title.setTextColor(Color.rgb(230, 0, 18));
-        title.setTextSize(30);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        root.addView(title);
+    @SuppressWarnings("deprecation")
+    private void hideSystemBars() {
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN);
+    }
 
-        status = new TextView(this);
-        status.setTextColor(Color.rgb(220, 220, 220));
-        status.setTextSize(14);
-        status.setPadding(0, dp(6), 0, dp(14));
-        root.addView(status);
+    private void initOptions() {
+        // DISPLAY
+        options.add(new Option(TAB_DISPLAY, "RESOLUTION",
+                "Resolución 3D", "3D Resolution",
+                "Escala de renderizado 3D (la interfaz se mantiene nítida)",
+                "3D scene render scale (UI stays crisp)",
+                new String[] {"360p", "480p", "540p", "720p", "1080p"},
+                new String[] {"360P", "480P", "540P", "720P", "1080P"},
+                new String[] {"360P", "480P", "540P", "720P", "1080P"}, 3, false));
+        options.add(new Option(TAB_DISPLAY, "NX_ULTRAWIDE",
+                "Pantalla ancha real (Hor+)", "True Widescreen (Hor+)",
+                "Amplía el campo de visión horizontal en pantallas 20:9 / 21:9",
+                "Expands horizontal 3D FOV to fill 20:9 / 21:9 displays",
+                new String[] {"0", "1"},
+                new String[] {"NO", "HOR+"},
+                new String[] {"OFF", "HOR+"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_UW_STRETCH_UI",
+                "Interfaz en Hor+", "Hor+ UI Framing",
+                "Mantener UI en 16:9 centrado o estirarla a los bordes",
+                "Keep UI undistorted 16:9 centered or stretch edge-to-edge",
+                new String[] {"0", "1"},
+                new String[] {"16:9", "COMPLETA"},
+                new String[] {"16:9", "FULL"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_STRETCH",
+                "Estirar imagen 16:9", "Fullscreen Stretch",
+                "Estira la imagen 16:9 a toda la pantalla (desactivado en Hor+)",
+                "Stretches 16:9 output to screen edges (disabled when Hor+ is on)",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_FSR",
+                "Superresolución (FSR 1.0)", "Super Resolution (FSR 1.0)",
+                "Reescalado y nitidez en la salida final (coste extra en GPU)",
+                "Upscaling and sharpening pass on output (adds GPU cost)",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_HUD_1080",
+                "Resolución de interfaz", "Interface Resolution",
+                "720p es más rápido; 1080p hace el texto más fino",
+                "720p is faster; 1080p renders sharper menus and portraits",
+                new String[] {"0", "1"},
+                new String[] {"720P", "1080P"},
+                new String[] {"720P", "1080P"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "language",
+                "Idioma de textos y subtítulos", "Text & Subtitle Language",
+                "Idioma del texto del juego (las voces se eligen dentro del juego)",
+                "In-game text language (voice track is chosen in-game)",
+                new String[] {"auto", "en-US", "es", "fr", "de", "it", "ja", "ko", "zh-Hans", "zh-Hant"},
+                new String[] {"Automático", "English", "Español", "Français", "Deutsch",
+                        "Italiano", "日本語", "한국어", "简体中文", "繁體中文"},
+                new String[] {"Automatic", "English", "Español", "Français", "Deutsch",
+                        "Italiano", "日本語", "한국어", "简体中文", "繁體中文"}, 0, true));
 
-        addRow(root, t("Archivo del juego (.nsp / .xci)", "Game file (.nsp / .xci)"), t("Elegir", "Choose"),
+        // PERFORMANCE
+        options.add(new Option(TAB_PERFORMANCE, "GRAPHICS",
+                "Calidad de texturas", "Texture Quality",
+                "Ajusta el sesgo de mipmaps (Bajo reduce uso de memoria)",
+                "Controls texture mipmap LOD bias (Low saves bandwidth)",
+                new String[] {"low", "medium", "high"},
+                new String[] {"BAJO", "MEDIO", "ALTO"},
+                new String[] {"LOW", "MED", "HIGH"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_FPS_CAP",
+                "Límite de FPS", "Frame Rate Cap",
+                "30 fps es estable; 60 fps es experimental",
+                "30 fps target for stability; 60 fps is experimental",
+                new String[] {"30", "60"},
+                new String[] {"30 FPS", "60 FPS"},
+                new String[] {"30 FPS", "60 FPS"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_SHADOWS",
+                "Sombras dinámicas", "Dynamic Shadows",
+                "Desactivarlas ahorra ~9% de GPU en escenas 3D",
+                "Disabling skips shadow map passes (~9% GPU savings)",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_MALI_LOW_SHADOWS",
+                "Calidad de sombras", "Shadow Map Scale",
+                "0.5x reduce el coste de sombras cuando están activas",
+                "0.5x half-resolution shadows when shadows are enabled",
+                new String[] {"1", "0"},
+                new String[] {"0.5X", "1.0X"},
+                new String[] {"0.5X", "1.0X"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_NO_CROWD",
+                "Multitudes de NPCs", "Crowd NPCs",
+                "Desactivarlas mejora los FPS en zonas llenas como Shibuya",
+                "Disabling removes background crowds for higher FPS in cities",
+                new String[] {"0", "1"},
+                new String[] {"SÍ", "NO"},
+                new String[] {"ON", "OFF"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_DISABLE_BLOOM",
+                "Post-procesado (Bloom)", "Bloom Post-Processing",
+                "Desactivarlo omite 12 pasadas de desenfoque HDR por frame",
+                "Disabling skips 12 HDR bloom blur passes per frame",
+                new String[] {"0", "1"},
+                new String[] {"SÍ", "NO"},
+                new String[] {"ON", "OFF"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_REPLAY_THREAD",
+                "Hilo de replay asíncrono", "Async Replay Thread",
+                "Separa la grabación de comandos del replay de Vulkan (más FPS)",
+                "Overlaps command recording and Vulkan replay across Big cores",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_SHOW_FPS",
+                "Contador de FPS", "FPS Counter",
+                "Muestra la tasa de fotogramas en pantalla durante el juego",
+                "Displays live frame rate overlay while playing",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_ENABLE_LOG",
+                "Registro de depuración (nx.log)", "Debug Logging (nx.log)",
+                "Actívalo solo para capturar errores (toque con 3 dedos)",
+                "Enable only when debugging or using the 3-finger capture tap",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+
+        // CONTROLS
+        options.add(new Option(TAB_CONTROLS, "NX_TOUCH_SHOW",
+                "Controles táctiles", "On-Screen Controls",
+                "Habilita o desactiva el mando virtual táctil",
+                "Enable or disable the virtual touchscreen overlay",
+                new String[] {"1", "0"},
+                new String[] {"SÍ", "NO"},
+                new String[] {"ON", "OFF"}, 0, false));
+        options.add(new Option(TAB_CONTROLS, "NX_TOUCH_HIDE",
+                "Visibilidad táctil", "Touch Visibility",
+                "Oculta los gráficos táctiles manteniendo la entrada activa",
+                "Keep touch controls invisible while still accepting touches",
+                new String[] {"0", "1"},
+                new String[] {"VISIBLE", "OCULTO"},
+                new String[] {"VISIBLE", "HIDDEN"}, 0, false));
+        options.add(new Option(TAB_CONTROLS, "NX_TOUCH_SIZE",
+                "Tamaño de botones", "Button Size",
+                "Escala de los botones virtuales en pantalla",
+                "Scale of virtual touchscreen buttons",
+                new String[] {"80", "100", "125"},
+                new String[] {"PEQ", "NORMAL", "GRANDE"},
+                new String[] {"SMALL", "NORMAL", "LARGE"}, 1, false));
+        options.add(new Option(TAB_CONTROLS, "NX_TOUCH_OPACITY",
+                "Opacidad de botones", "Button Opacity",
+                "Transparencia del mando táctil sobre el juego",
+                "Transparency of on-screen touch controls",
+                new String[] {"50", "85", "100"},
+                new String[] {"50%", "85%", "100%"},
+                new String[] {"50%", "85%", "100%"}, 1, false));
+        options.add(new Option(TAB_CONTROLS, "NX_GAMEPAD_LAYOUT",
+                "Distribución del mando físico", "Physical Gamepad Layout",
+                "Mapeo de botones A/B/X/Y para mandos Bluetooth o USB",
+                "Face button mapping for Bluetooth / USB controllers",
+                new String[] {"0", "1"},
+                new String[] {"NINTENDO", "XBOX / PC"},
+                new String[] {"NINTENDO", "XBOX / PC"}, 0, false));
+        options.add(new Option(TAB_CONTROLS, "NX_STICK_SENSITIVITY",
+                "Sensibilidad palanca táctil", "Touch Stick Sensitivity",
+                "Velocidad de respuesta del stick izquierdo táctil",
+                "Response multiplier for the virtual left analog stick",
+                new String[] {"50", "75", "100", "125", "150", "200"},
+                new String[] {"50%", "75%", "100%", "125%", "150%", "200%"},
+                new String[] {"50%", "75%", "100%", "125%", "150%", "200%"}, 2, true));
+        options.add(new Option(TAB_CONTROLS, "NX_CAMERA_SENSITIVITY",
+                "Sensibilidad cámara táctil", "Touch Camera Sensitivity",
+                "Velocidad de giro de cámara al arrastrar en pantalla",
+                "Rotation speed for touch camera drag",
+                new String[] {"50", "75", "100", "125", "150", "200", "250"},
+                new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"},
+                new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"}, 2, true));
+    }
+
+    // ---- UI construction (Direction A: P5 Pause / Calling Card) ----
+
+    private void buildUi() {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(P5Theme.INK_BLACK);
+
+        // Full-bleed background canvas
+        bgView = new P5BackgroundView(this);
+        root.addView(bgView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // Foreground two-zone landscape deck (respects display cutouts)
+        foregroundRoot = new LinearLayout(this);
+        foregroundRoot.setOrientation(LinearLayout.HORIZONTAL);
+        foregroundRoot.setClipChildren(false);
+        foregroundRoot.setClipToPadding(false);
+        root.addView(foregroundRoot, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        foregroundRoot.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                int left = 0, right = 0, top = 0, bottom = 0;
+                if (Build.VERSION.SDK_INT >= 28) {
+                    DisplayCutout dc = insets.getDisplayCutout();
+                    if (dc != null) {
+                        left = dc.getSafeInsetLeft();
+                        right = dc.getSafeInsetRight();
+                        top = dc.getSafeInsetTop();
+                        bottom = dc.getSafeInsetBottom();
+                    }
+                }
+                v.setPadding(left, top, right, bottom);
+                return insets;
+            }
+        });
+
+        // LEFT COMMAND RAIL
+        LinearLayout leftRail = buildLeftRail();
+        foregroundRoot.addView(leftRail, new LinearLayout.LayoutParams(
+                dp(250), LinearLayout.LayoutParams.MATCH_PARENT));
+
+        // RIGHT DYNAMIC STAGE
+        FrameLayout rightStage = new FrameLayout(this);
+        rightStage.setClipChildren(false);
+        rightStage.setClipToPadding(false);
+        rightStage.setPadding(dp(22), dp(14), dp(22), dp(14));
+        foregroundRoot.addView(rightStage, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+
+        tabPanels[TAB_PLAY] = buildPlayPanel();
+        tabPanels[TAB_DISPLAY] = buildSettingsPanel(TAB_DISPLAY,
+                t("PANTALLA", "DISPLAY"), t("RES · HOR+ · FSR", "RES · HOR+ · FSR"));
+        tabPanels[TAB_PERFORMANCE] = buildSettingsPanel(TAB_PERFORMANCE,
+                t("RENDIMIENTO", "PERFORMANCE"), t("FPS · SOMBRAS · GPU", "FPS · SHADOWS · GPU"));
+        tabPanels[TAB_CONTROLS] = buildControlsPanel();
+        tabPanels[TAB_FILES] = buildFilesPanel();
+
+        for (int i = 0; i < TAB_COUNT; i++) {
+            tabPanels[i].setVisibility(i == TAB_PLAY ? View.VISIBLE : View.GONE);
+            rightStage.addView(tabPanels[i], new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+
+        setContentView(root);
+        selectTab(TAB_PLAY, false);
+    }
+
+    private LinearLayout buildLeftRail() {
+        LinearLayout rail = new LinearLayout(this);
+        rail.setOrientation(LinearLayout.VERTICAL);
+        rail.setClipChildren(false);
+        rail.setClipToPadding(false);
+        rail.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        // Ransom-cut P5R Masthead
+        P5Views.CutTitleView masthead = new P5Views.CutTitleView(this);
+        LinearLayout.LayoutParams mhLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(58));
+        mhLp.bottomMargin = dp(8);
+        rail.addView(masthead, mhLp);
+
+        // 5 Slanted Pause-Menu Tabs
+        final String[] tabNames = {
+            t("JUGAR", "PLAY"),
+            t("PANTALLA", "DISPLAY"),
+            t("RENDIMIENTO", "PERFORMANCE"),
+            t("CONTROLES", "CONTROLS"),
+            t("ARCHIVOS", "FILES")
+        };
+        final String[] tabNums = {"01", "02", "03", "04", "05"};
+
+        LinearLayout navGroup = new LinearLayout(this);
+        navGroup.setOrientation(LinearLayout.VERTICAL);
+        navGroup.setClipChildren(false);
+        for (int i = 0; i < TAB_COUNT; i++) {
+            final int idx = i;
+            P5Views.NavTabView tab = new P5Views.NavTabView(this, tabNames[i], tabNums[i]);
+            tab.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    selectTab(idx, true);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(40));
+            lp.bottomMargin = dp(3);
+            navGroup.addView(tab, lp);
+            navTabs[i] = tab;
+        }
+        // Wrap navGroup in a lightweight flex spacer so bottom pinned Play sits cleanly at the foot
+        ScrollView navScroll = new ScrollView(this);
+        navScroll.setVerticalScrollBarEnabled(false);
+        navScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        navScroll.setClipChildren(false);
+        navScroll.addView(navGroup);
+        rail.addView(navScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Hybrid Pinned PLAY button (hidden on TAB_PLAY, visible on all other tabs)
+        pinnedPlay = new P5Views.SlashButton(this, t("JUGAR", "PLAY"), true, 46);
+        pinnedPlay.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { onPlayClicked(); }
+        });
+        LinearLayout.LayoutParams ppLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
+        ppLp.topMargin = dp(6);
+        ppLp.rightMargin = dp(18);
+        rail.addView(pinnedPlay, ppLp);
+
+        // Compact bottom readiness stamp
+        railStatusText = new TextView(this);
+        railStatusText.setTypeface(P5Theme.monoBold());
+        railStatusText.setTextSize(10.5f);
+        railStatusText.setTextColor(P5Theme.MUTED_TEXT);
+        railStatusText.setSingleLine(true);
+        railStatusText.setPadding(dp(6), dp(5), dp(14), 0);
+        rail.addView(railStatusText);
+
+        return rail;
+    }
+
+    private View buildPlayPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setClipChildren(false);
+
+        // Top-right: Active Profile Spec Badges
+        LinearLayout specBar = new LinearLayout(this);
+        specBar.setOrientation(LinearLayout.HORIZONTAL);
+        specBar.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        specBar.setClipChildren(false);
+
+        specRes = addSpecBadge(specBar, "RES", "540P", true);
+        specView = addSpecBadge(specBar, "VIEW", "16:9", false);
+        specFps = addSpecBadge(specBar, "FPS", "30", false);
+        specGfx = addSpecBadge(specBar, "GFX", "LOW", false);
+        specExtra = addSpecBadge(specBar, "FSR", "OFF", false);
+        panel.addView(specBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        // Breathing space so procedural P5 art or custom wallpaper shines
+        View spacer = new View(this);
+        panel.addView(spacer, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Crisp cut-paper status strip (warning highlight when setup needed, sleek stamp when ready)
+        heroStatusCard = new P5Views.AngledRowLayout(this);
+        heroStatusCard.setOrientation(LinearLayout.VERTICAL);
+        heroStatusTitle = new TextView(this);
+        heroStatusTitle.setTypeface(P5Theme.displayBold());
+        heroStatusTitle.setTextSize(13.5f);
+        heroStatusTitle.setTextColor(P5Theme.ACID_YELLOW);
+        heroStatusCard.addView(heroStatusTitle);
+
+        heroStatusBody = new TextView(this);
+        heroStatusBody.setTypeface(P5Theme.bodyRegular());
+        heroStatusBody.setTextSize(12.5f);
+        heroStatusBody.setTextColor(P5Theme.PAPER_WHITE);
+        heroStatusBody.setMaxLines(2);
+        heroStatusCard.addView(heroStatusBody);
+
+        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
+                dp(430), LinearLayout.LayoutParams.WRAP_CONTENT);
+        stLp.gravity = Gravity.END;
+        stLp.bottomMargin = dp(12);
+        panel.addView(heroStatusCard, stLp);
+
+        // Bottom-right Action Row: Wallpaper chip(s) + Hero PLAY Slash Button
+        LinearLayout bottomRow = new LinearLayout(this);
+        bottomRow.setOrientation(LinearLayout.HORIZONTAL);
+        bottomRow.setGravity(Gravity.END | Gravity.BOTTOM);
+        bottomRow.setClipChildren(false);
+
+        P5Views.SlashButton wpBtn = new P5Views.SlashButton(this, t("FONDO", "WALLPAPER"), false, 44);
+        wpBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { pick(PICK_WALLPAPER, "image/*", false); }
+        });
+        LinearLayout.LayoutParams wpLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+        wpLp.rightMargin = dp(8);
+        wpLp.bottomMargin = dp(6);
+        bottomRow.addView(wpBtn, wpLp);
+
+        heroResetWp = new P5Views.SlashButton(this, t("RESET", "RESET"), false, 44);
+        heroResetWp.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { clearWallpaper(); }
+        });
+        LinearLayout.LayoutParams rwLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+        rwLp.rightMargin = dp(12);
+        rwLp.bottomMargin = dp(6);
+        bottomRow.addView(heroResetWp, rwLp);
+
+        heroPlay = new P5Views.SlashButton(this, t("JUGAR", "PLAY"), true, 62);
+        heroPlay.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { onPlayClicked(); }
+        });
+        LinearLayout.LayoutParams hpLp = new LinearLayout.LayoutParams(dp(236), dp(62));
+        bottomRow.addView(heroPlay, hpLp);
+
+        panel.addView(bottomRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        return panel;
+    }
+
+    private P5Views.SpecBadge addSpecBadge(LinearLayout bar, String key, String val, boolean accent) {
+        P5Views.SpecBadge b = new P5Views.SpecBadge(this, key, val, accent);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(28));
+        lp.leftMargin = dp(6);
+        bar.addView(b, lp);
+        return b;
+    }
+
+    private View buildSettingsPanel(int tab, String title, String subtitle) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this, title, subtitle);
+        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        hLp.bottomMargin = dp(8);
+        col.addView(hdr, hLp);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.setClipToPadding(false);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, dp(2), 0, dp(16));
+
+        for (Option o : options) {
+            if (o.tab == tab) addOptionRow(list, o);
+        }
+        scroll.addView(list);
+        col.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return col;
+    }
+
+    private View buildControlsPanel() {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
+                t("CONTROLES", "CONTROLS"), t("TÁCTIL · MANDO", "TOUCH · GAMEPAD"));
+        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        hLp.bottomMargin = dp(8);
+        col.addView(hdr, hLp);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, dp(2), 0, dp(16));
+
+        // Top action row: Move Controls Editor
+        addActionRow(list,
+                t("Posición de controles táctiles", "On-Screen Controls Layout"),
+                t("Arrastra y acomoda los botones directamente en pantalla",
+                        "Drag and position virtual buttons directly on screen"),
+                t("EDITAR", "EDIT LAYOUT"),
                 new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        pick(PICK_GAME, "*/*", false);
-                    }
-                });
-        addRow(root, t("Claves (prod.keys)", "Keys (prod.keys)"), t("Elegir", "Choose"), new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pick(PICK_KEYS, "*/*", true);
-            }
-        });
-        addRow(root, t("Icono", "Icon"), t("Elegir imagen", "Choose a picture"), new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pick(PICK_ICON, "image/*", false);
-            }
-        });
-
-        for (final Option o : options) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(4), 0, dp(4));
-            TextView name = new TextView(this);
-            name.setText(t(o.es, o.en));
-            name.setTextColor(Color.WHITE);
-            name.setTextSize(17);
-            row.addView(name, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-            final Button value = new Button(this);
-            value.setAllCaps(false);
-            value.setMinWidth(dp(180));
-            row.addView(value);
-            value.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    o.pick = (o.pick + 1) % o.values.length;
-                    value.setText(label(o));
-                    save();
-                    updateButtons(getWindow().getDecorView());
-                }
-            });
-            value.setTag(o);
-            root.addView(row);
-        }
-
-        LinearLayout edit = new LinearLayout(this);
-        edit.setOrientation(LinearLayout.HORIZONTAL);
-        edit.setGravity(Gravity.CENTER_VERTICAL);
-        edit.setPadding(0, dp(4), 0, dp(4));
-        TextView editName = new TextView(this);
-        editName.setText(t("Posición de los controles", "Controls position"));
-        editName.setTextColor(Color.WHITE);
-        editName.setTextSize(17);
-        edit.addView(editName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button editButton = new Button(this);
-        editButton.setAllCaps(false);
-        editButton.setMinWidth(dp(180));
-        editButton.setText(t("Mover", "Move"));
-        edit.addView(editButton);
-        editButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!hasAccess()) {
-                    askAccess();
-                    return;
-                }
-                save();
-                startActivity(new Intent(Launcher.this, ControlsEditor.class));
-            }
-        });
-        root.addView(edit);
-
-        // Saves: in from a ZIP or a folder (a Switch backup or another player's), out to a ZIP in Download.
-        LinearLayout saves = new LinearLayout(this);
-        saves.setOrientation(LinearLayout.HORIZONTAL);
-        saves.setGravity(Gravity.CENTER_VERTICAL);
-        saves.setPadding(0, dp(4), 0, dp(4));
-        TextView savesName = new TextView(this);
-        savesName.setText(t("Partidas guardadas", "Saves"));
-        savesName.setTextColor(Color.WHITE);
-        savesName.setTextSize(17);
-        saves.addView(savesName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button importButton = new Button(this);
-        importButton.setAllCaps(false);
-        importButton.setMinWidth(dp(88));
-        importButton.setText(t("Importar", "Import"));
-        saves.addView(importButton);
-        Button exportButton = new Button(this);
-        exportButton.setAllCaps(false);
-        exportButton.setMinWidth(dp(88));
-        exportButton.setText(t("Exportar", "Export"));
-        saves.addView(exportButton);
-        importButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!hasAccess()) {
-                    askAccess();
-                    return;
-                }
-                askImport();
-            }
-        });
-        exportButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!hasAccess()) {
-                    askAccess();
-                    return;
-                }
-                exportSaves();
-            }
-        });
-        root.addView(saves);
-
-        // Translation CPK import
-        LinearLayout transRow = new LinearLayout(this);
-        transRow.setOrientation(LinearLayout.HORIZONTAL);
-        transRow.setGravity(Gravity.CENTER_VERTICAL);
-        transRow.setPadding(0, dp(4), 0, dp(4));
-        TextView transName = new TextView(this);
-        transName.setText(t("Traducción / Paquete (.cpk)", "Translation / CPK mod"));
-        transName.setTextColor(Color.WHITE);
-        transName.setTextSize(17);
-        transRow.addView(transName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button transButton = new Button(this);
-        transButton.setAllCaps(false);
-        transButton.setMinWidth(dp(180));
-        transButton.setText(t("Importar CPK", "Import CPK"));
-        transRow.addView(transButton);
-        transButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!hasAccess()) {
-                    askAccess();
-                    return;
-                }
-                pick(PICK_CPK, "*/*", false);
-            }
-        });
-        root.addView(transRow);
-
-        // Custom GPU driver (e.g. Mesa Turnip for Adreno): imported into the app's private files, opened by the runtime
-        LinearLayout drvRow = new LinearLayout(this);
-        drvRow.setOrientation(LinearLayout.HORIZONTAL);
-        drvRow.setGravity(Gravity.CENTER_VERTICAL);
-        drvRow.setPadding(0, dp(4), 0, dp(4));
-        driverName = new TextView(this);
-        driverName.setTextColor(Color.WHITE);
-        driverName.setTextSize(17);
-        drvRow.addView(driverName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button drvImport = new Button(this);
-        drvImport.setAllCaps(false);
-        drvImport.setMinWidth(dp(88));
-        drvImport.setText(t("Importar", "Import"));
-        drvRow.addView(drvImport);
-        Button drvRemove = new Button(this);
-        drvRemove.setAllCaps(false);
-        drvRemove.setMinWidth(dp(88));
-        drvRemove.setText(t("Quitar", "Remove"));
-        drvRow.addView(drvRemove);
-        drvImport.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pick(PICK_DRIVER, "*/*", false);
-            }
-        });
-        drvRemove.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                removeDriver();
-            }
-        });
-        root.addView(drvRow);
-        showDriver();
-
-        // Debug logs export
-        LinearLayout logsRow = new LinearLayout(this);
-        logsRow.setOrientation(LinearLayout.HORIZONTAL);
-        logsRow.setGravity(Gravity.CENTER_VERTICAL);
-        logsRow.setPadding(0, dp(4), 0, dp(4));
-        TextView logsName = new TextView(this);
-        logsName.setText(t("Registros de depuración", "Debug logs"));
-        logsName.setTextColor(Color.WHITE);
-        logsName.setTextSize(17);
-        logsRow.addView(logsName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button logsButton = new Button(this);
-        logsButton.setAllCaps(false);
-        logsButton.setMinWidth(dp(180));
-        logsButton.setText(t("Exportar registros", "Export logs"));
-        logsRow.addView(logsButton);
-        logsButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                exportLogs();
-            }
-        });
-        root.addView(logsRow);
-
-        play = new Button(this);
-        play.setTextSize(20);
-        play.setAllCaps(false);
-        play.setBackgroundColor(Color.rgb(230, 0, 18));
-        play.setTextColor(Color.WHITE);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64));
-        lp.topMargin = dp(18);
-        root.addView(play, lp);
-        play.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!hasAccess()) {
-                    askAccess();
-                    return;
-                }
-                if (gameUri() != null) {  // the game file the player picked
-                    if (!gameReadable()) pick(PICK_GAME, "*/*", false);
-                    else if (!hasKeys()) pick(PICK_KEYS, "*/*", true);
-                    else if (!prepared()) prepare();
-                    else if (openGameForRuntime()) {
+                        if (!hasAccess()) { askAccess(); return; }
                         save();
-                        startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
-                    } else {
-                        tell(t("No se pudo abrir el juego", "The game could not be opened"), gameName());
+                        startActivity(new Intent(Launcher.this, ControlsEditor.class));
                     }
-                    return;
-                }
-                if (!hasData()) {
-                    pick(PICK_GAME, "*/*", false);
-                    return;
-                }
-                if (wrongBuild() != null) {
-                    refresh();
-                    return;
-                }
-                save();
-                startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
-            }
-        });
+                }, null, null, true);
+
+        for (Option o : options) {
+            if (o.tab == TAB_CONTROLS) addOptionRow(list, o);
+        }
+        scroll.addView(list);
+        col.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return col;
+    }
+
+    private View buildFilesPanel() {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
+                t("ARCHIVOS Y MODS", "FILES & MODS"), t("DATOS · PARTIDAS · DRIVERS", "DATA · SAVES · DRIVERS"));
+        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        hLp.bottomMargin = dp(8);
+        col.addView(hdr, hLp);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.addView(root);
-        setContentView(scroll);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, dp(2), 0, dp(16));
+
+        gameSub = addActionRow(list,
+                t("Archivo del juego (.nsp / .xci)", "Game File (.nsp / .xci)"),
+                t("Persona 5 Royal 1.0.0 base", "Persona 5 Royal 1.0.0 base dump"),
+                t("ELEGIR", "CHOOSE"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { pick(PICK_GAME, "*/*", false); }
+                }, null, null, false);
+
+        keysSub = addActionRow(list,
+                t("Claves (prod.keys)", "Console Keys (prod.keys)"),
+                t("Necesarias para leer archivos .nsp / .xci", "Required to decrypt .nsp / .xci files"),
+                t("ELEGIR", "CHOOSE"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { pick(PICK_KEYS, "*/*", true); }
+                }, null, null, false);
+
+        addActionRow(list,
+                t("Partidas guardadas", "Save Data"),
+                t("Importa desde ZIP o carpeta (JKSV / Checkpoint) o exporta a Descargas",
+                        "Import ZIP/folder (JKSV / Checkpoint) or export backup to Download"),
+                t("IMPORTAR", "IMPORT"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (!hasAccess()) { askAccess(); return; }
+                        askImport();
+                    }
+                },
+                t("EXPORTAR", "EXPORT"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (!hasAccess()) { askAccess(); return; }
+                        exportSaves();
+                    }
+                }, false);
+
+        addActionRow(list,
+                t("Traducción / Mod (.cpk)", "Translation / CPK Mod"),
+                t("Instala un paquete PATCH1.CPK en mods/translation/",
+                        "Installs a PATCH1.CPK mod into mods/translation/"),
+                t("IMPORTAR CPK", "IMPORT CPK"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (!hasAccess()) { askAccess(); return; }
+                        pick(PICK_CPK, "*/*", false);
+                    }
+                }, null, null, false);
+
+        driverSub = addActionRow(list,
+                t("Driver de GPU personalizado", "Custom GPU Driver"),
+                t("Driver del sistema", "System driver"),
+                t("IMPORTAR", "IMPORT"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { pick(PICK_DRIVER, "*/*", false); }
+                },
+                t("QUITAR", "REMOVE"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { removeDriver(); }
+                }, false);
+
+        wpSub = addActionRow(list,
+                t("Fondo del lanzador", "Launcher Wallpaper"),
+                t("Arte P5 por defecto", "Default P5 procedural art"),
+                t("ELEGIR", "CHOOSE"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { pick(PICK_WALLPAPER, "image/*", false); }
+                },
+                t("RESTAURAR", "RESET"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { clearWallpaper(); }
+                }, false);
+
+        addActionRow(list,
+                t("Acceso directo con icono propio", "Custom Home Shortcut Icon"),
+                t("Crea un acceso directo en tu pantalla de inicio con tu imagen",
+                        "Pins a home screen shortcut using your own picture"),
+                t("ELEGIR", "CHOOSE"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { pick(PICK_ICON, "image/*", false); }
+                }, null, null, false);
+
+        addActionRow(list,
+                t("Registros de depuración", "Debug Logs"),
+                t("Exporta logcat + nx.log a Download/p5r-log.txt",
+                        "Exports logcat + nx.log to Download/p5r-log.txt"),
+                t("EXPORTAR", "EXPORT LOGS"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) { exportLogs(); }
+                }, null, null, false);
+
+        scroll.addView(list);
+        col.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return col;
     }
+
+    private void addOptionRow(LinearLayout parent, final Option o) {
+        P5Views.AngledRowLayout row = new P5Views.AngledRowLayout(this);
+        o.rowView = row;
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+        textCol.setPadding(dp(4), 0, dp(10), 0);
+
+        TextView title = new TextView(this);
+        title.setText(t(o.es, o.en));
+        title.setTypeface(P5Theme.condensedBold());
+        title.setTextSize(15.5f);
+        title.setTextColor(P5Theme.PAPER_WHITE);
+        textCol.addView(title);
+
+        TextView desc = new TextView(this);
+        desc.setText(t(o.descEs, o.descEn));
+        desc.setTypeface(P5Theme.bodyRegular());
+        desc.setTextSize(11.5f);
+        desc.setTextColor(P5Theme.MUTED_TEXT);
+        textCol.addView(desc);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (o.modal) {
+            final P5Views.SlashButton btn = new P5Views.SlashButton(this, label(o) + " ▾", false, 38);
+            btn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    P5Views.showPickerDialog(Launcher.this, t(o.es, o.en), labelsOf(o), o.pick,
+                            new P5Views.OnModalPick() {
+                                @Override
+                                public void onPick(int index) {
+                                    o.pick = index;
+                                    save();
+                                    syncOptionViews();
+                                }
+                            });
+                }
+            });
+            o.modalBtn = btn;
+            row.addView(btn, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)));
+        } else {
+            P5Views.SegmentedControl seg = new P5Views.SegmentedControl(this, labelsOf(o), o.pick,
+                    new P5Views.SegmentedControl.OnPickListener() {
+                        @Override
+                        public void onPick(int index) {
+                            o.pick = index;
+                            save();
+                            syncOptionViews();
+                        }
+                    });
+            o.segView = seg;
+            row.addView(seg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        }
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(6);
+        parent.addView(row, lp);
+    }
+
+    private TextView addActionRow(LinearLayout parent, String titleText, String subText,
+                                  String btn1Label, View.OnClickListener click1,
+                                  String btn2Label, View.OnClickListener click2, boolean highlight) {
+        P5Views.AngledRowLayout row = new P5Views.AngledRowLayout(this);
+        row.setHighlight(highlight);
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+        textCol.setPadding(dp(4), 0, dp(10), 0);
+
+        TextView title = new TextView(this);
+        title.setText(titleText);
+        title.setTypeface(P5Theme.condensedBold());
+        title.setTextSize(15.5f);
+        title.setTextColor(P5Theme.PAPER_WHITE);
+        textCol.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText(subText);
+        sub.setTypeface(P5Theme.bodyRegular());
+        sub.setTextSize(11.5f);
+        sub.setTextColor(P5Theme.MUTED_TEXT);
+        textCol.addView(sub);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        P5Views.SlashButton b1 = new P5Views.SlashButton(this, btn1Label, highlight, 38);
+        b1.setOnClickListener(click1);
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(38));
+        row.addView(b1, lp1);
+
+        if (btn2Label != null && click2 != null) {
+            P5Views.SlashButton b2 = new P5Views.SlashButton(this, btn2Label, false, 38);
+            b2.setOnClickListener(click2);
+            LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(38));
+            lp2.leftMargin = dp(6);
+            row.addView(b2, lp2);
+        }
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(6);
+        parent.addView(row, lp);
+        return sub;
+    }
+
+    // ---- Tab switching & Hybrid Pinned Play logic ----
+
+    private void selectTab(int idx, boolean animate) {
+        activeTab = idx;
+        for (int i = 0; i < TAB_COUNT; i++) {
+            navTabs[i].setActive(i == idx, animate);
+            boolean show = (i == idx);
+            View panel = tabPanels[i];
+            if (show) {
+                panel.setVisibility(View.VISIBLE);
+                if (animate) {
+                    panel.setAlpha(0f);
+                    panel.setTranslationX(dp(18));
+                    panel.animate().alpha(1f).translationX(0f)
+                            .setDuration(170).setInterpolator(new DecelerateInterpolator()).start();
+                } else {
+                    panel.setAlpha(1f);
+                    panel.setTranslationX(0f);
+                }
+            } else {
+                panel.setVisibility(View.GONE);
+            }
+        }
+
+        // Hybrid Play button: hidden on TAB_PLAY (Hero Play is on stage), pinned on Settings tabs
+        boolean showPinned = (idx != TAB_PLAY);
+        if (showPinned) {
+            boolean wasHidden = pinnedPlay.getVisibility() != View.VISIBLE;
+            pinnedPlay.setVisibility(View.VISIBLE);
+            if (animate && wasHidden) {
+                pinnedPlay.setAlpha(0f);
+                pinnedPlay.setTranslationY(dp(14));
+                pinnedPlay.animate().alpha(1f).translationY(0f)
+                        .setDuration(160).setInterpolator(new DecelerateInterpolator()).start();
+            } else {
+                pinnedPlay.setAlpha(1f);
+                pinnedPlay.setTranslationY(0f);
+            }
+        } else {
+            pinnedPlay.setVisibility(View.GONE);
+        }
+
+        bgView.setSettingsMode(idx != TAB_PLAY, animate);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
+            selectTab((activeTab + TAB_COUNT - 1) % TAB_COUNT, true);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_R1) {
+            selectTab((activeTab + 1) % TAB_COUNT, true);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_START || keyCode == KeyEvent.KEYCODE_BUTTON_X) {
+            onPlayClicked();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    // ---- Launch action ----
+
+    private void onPlayClicked() {
+        if (!hasAccess()) {
+            askAccess();
+            return;
+        }
+        if (gameUri() != null) {
+            if (!gameReadable()) pick(PICK_GAME, "*/*", false);
+            else if (!hasKeys()) pick(PICK_KEYS, "*/*", true);
+            else if (!prepared()) prepare();
+            else if (openGameForRuntime()) {
+                save();
+                startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+            } else {
+                tell(t("No se pudo abrir el juego", "The game could not be opened"), gameName());
+            }
+            return;
+        }
+        if (!hasData()) {
+            pick(PICK_GAME, "*/*", false);
+            return;
+        }
+        if (wrongBuild() != null) {
+            refresh();
+            return;
+        }
+        save();
+        startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+    }
+
+    // ---- State sync ----
 
     void refresh() {
         load();
@@ -680,104 +1276,172 @@ public class Launcher extends Activity {
                     else v = "720p";
                 }
             }
-            for (int k = 0; v != null && k < o.values.length; k++)
+            for (int k = 0; v != null && k < o.values.length; k++) {
                 if (o.values[k].equals(v)) o.pick = k;
+            }
         }
-        updateButtons(getWindow().getDecorView());
-        if (!hasAccess()) {
-            status.setText(t("Hace falta el permiso de acceso a todos los archivos para leer los datos del juego.",
-                    "All-files access is needed to read the game data."));
-            play.setText(t("Dar permiso", "Grant access"));
-        } else if (gameUri() != null && !gameReadable()) {
-            status.setText(Lang.f("Ya no se puede leer el archivo del juego (%s): vuelve a elegirlo.",
-                    "The game file can no longer be read (%s): choose it again.", gameName()));
-            play.setText(t("Elegir el juego", "Choose the game"));
-        } else if (gameUri() != null && !hasKeys()) {
-            status.setText(t("Falta tu archivo prod.keys.", "Your prod.keys file is missing."));
-            play.setText(t("Elegir prod.keys", "Choose prod.keys"));
-        } else if (gameUri() != null && !prepared()) {
-            status.setText(Lang.f("Juego: %s. Falta prepararlo: solo una vez, unos minutos.",
-                    "Game: %s. It needs preparing: once, a few minutes.", gameName()));
-            play.setText(t("Preparar el juego", "Prepare the game"));
-        } else if (gameUri() != null) {
-            status.setText(Lang.f("Juego listo: %s", "Game ready: %s", gameName()));
-            play.setText(t("Jugar", "Play"));
-        } else if (!hasData()) {
-            status.setText(t("Elige el archivo de tu juego (.nsp o .xci de Persona 5 Royal 1.0.0) y tu prod.keys.",
-                    "Choose your game file (a Persona 5 Royal 1.0.0 .nsp or .xci) and your prod.keys."));
-            play.setText(t("Elegir el juego", "Choose the game"));
-        } else if (wrongBuild() != null) {
-            status.setText(Lang.f("Almacenamiento interno/%s/exefs/main no es Persona 5 Royal 1.0.0 (build %s). Copia el "
-                            + "exefs del juego base, sin la actualización.",
-                    "Internal storage/%s/exefs/main is not Persona 5 Royal 1.0.0 (build %s). Copy the exefs of the base "
-                            + "game, without the update.", DATA, wrongBuild()));
-            play.setText(t("Volver a buscar", "Look again"));
-        } else {
-            status.setText(Lang.f("Datos listos: %s", "Data ready: %s", dataDir().getPath()));
-            play.setText(t("Jugar", "Play"));
+        syncOptionViews();
+        updateWallpaperUi();
+        showDriver();
+        updateReadiness();
+    }
+
+    private void syncOptionViews() {
+        Option shadows = findOption("NX_SHADOWS");
+        boolean shadowsOn = shadows != null && "1".equals(shadows.values[shadows.pick]);
+        Option uw = findOption("NX_ULTRAWIDE");
+        boolean uwOn = uw != null && "1".equals(uw.values[uw.pick]);
+        Option stretchOpt = findOption("NX_STRETCH");
+        if (uwOn && stretchOpt != null) stretchOpt.pick = 0;
+
+        for (Option o : options) {
+            if (o.segView != null) o.segView.setSelectedIndex(o.pick);
+            if (o.modalBtn != null) o.modalBtn.setText(label(o) + " ▾");
+
+            boolean enabled = true;
+            if ("NX_MALI_LOW_SHADOWS".equals(o.key)) enabled = shadowsOn;
+            else if ("NX_UW_STRETCH_UI".equals(o.key)) enabled = uwOn;
+            else if ("NX_STRETCH".equals(o.key)) enabled = !uwOn;
+
+            if (o.rowView != null) o.rowView.setAlpha(enabled ? 1.0f : 0.36f);
+            if (o.segView != null) o.segView.setEnabled(enabled);
+            if (o.modalBtn != null) o.modalBtn.setEnabled(enabled);
+        }
+
+        // Update Home hero spec badges
+        Option resOpt = findOption("RESOLUTION");
+        Option fpsOpt = findOption("NX_FPS_CAP");
+        Option gfxOpt = findOption("GRAPHICS");
+        Option fsrOpt = findOption("NX_FSR");
+
+        if (specRes != null && resOpt != null) {
+            specRes.setValue(resOpt.values[resOpt.pick].toUpperCase(Locale.ROOT), true);
+        }
+        if (specView != null) {
+            String viewVal = uwOn ? "HOR+" : (stretchOpt != null && "1".equals(stretchOpt.values[stretchOpt.pick]) ? "STRETCH" : "16:9");
+            specView.setValue(viewVal, uwOn);
+        }
+        if (specFps != null && fpsOpt != null) {
+            specFps.setValue(fpsOpt.values[fpsOpt.pick], false);
+        }
+        if (specGfx != null && gfxOpt != null) {
+            specGfx.setValue(gfxOpt.values[gfxOpt.pick].toUpperCase(Locale.ROOT), false);
+        }
+        if (specExtra != null && fsrOpt != null) {
+            boolean fsrOn = "1".equals(fsrOpt.values[fsrOpt.pick]);
+            specExtra.setValue(fsrOn ? "ON" : "OFF", false);
         }
     }
 
-    void updateButtons(View v) {
-        if (v instanceof Button && v.getTag() instanceof Option) {
-            Option o = (Option) v.getTag();
-            Button b = (Button) v;
-            b.setText(label(o));
-            if ("NX_MALI_LOW_SHADOWS".equals(o.key)) {
-                Option shadows = findOption("NX_SHADOWS");
-                boolean enabled = shadows != null && "1".equals(shadows.values[shadows.pick]);
-                b.setEnabled(enabled);
-                b.setAlpha(enabled ? 1.0f : 0.4f);
-                if (b.getParent() instanceof View) {
-                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
-                }
-            } else if ("NX_UW_STRETCH_UI".equals(o.key)) {
-                Option uw = findOption("NX_ULTRAWIDE");
-                boolean enabled = uw != null && "1".equals(uw.values[uw.pick]);
-                b.setEnabled(enabled);
-                b.setAlpha(enabled ? 1.0f : 0.4f);
-                if (b.getParent() instanceof View) {
-                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
-                }
-            }
-        } else if (v instanceof android.view.ViewGroup) {
-            android.view.ViewGroup g = (android.view.ViewGroup) v;
-            for (int k = 0; k < g.getChildCount(); k++) updateButtons(g.getChildAt(k));
+    private void updateReadiness() {
+        String playLabel;
+        String title;
+        String body;
+        boolean warn = false;
+
+        if (!hasAccess()) {
+            warn = true;
+            title = t("PERMISO REQUERIDO", "ACCESS REQUIRED");
+            body = t("Hace falta acceso a todos los archivos para leer los datos del juego.",
+                    "All-files access is required to read your Persona 5 Royal data.");
+            playLabel = t("DAR PERMISO", "GRANT ACCESS");
+        } else if (gameUri() != null && !gameReadable()) {
+            warn = true;
+            title = t("ARCHIVO NO LEGIBLE", "GAME FILE UNREADABLE");
+            body = Lang.f("No se puede leer %s. Vuelve a elegir el archivo.",
+                    "Cannot read %s. Please select the file again.", gameName());
+            playLabel = t("ELEGIR JUEGO", "CHOOSE GAME");
+        } else if (gameUri() != null && !hasKeys()) {
+            warn = true;
+            title = t("FALTA PROD.KEYS", "MISSING PROD.KEYS");
+            body = t("Elige el archivo prod.keys de tu consola en Archivos.",
+                    "Select your console's prod.keys file to decrypt the game.");
+            playLabel = t("ELEGIR KEYS", "CHOOSE KEYS");
+        } else if (gameUri() != null && !prepared()) {
+            warn = true;
+            title = t("PREPARACIÓN PENDIENTE", "PREPARATION NEEDED");
+            body = Lang.f("Juego: %s. Falta traducir los shaders una sola vez.",
+                    "Game: %s. One-time shader translation is needed.", gameName());
+            playLabel = t("PREPARAR", "PREPARE GAME");
+        } else if (gameUri() != null) {
+            title = t("LISTO PARA JUGAR", "READY TO PLAY");
+            body = gameName();
+            playLabel = t("JUGAR  ▶", "PLAY  ▶");
+        } else if (!hasData()) {
+            warn = true;
+            title = t("SIN DATOS DE JUEGO", "NO GAME DATA");
+            body = t("Elige tu archivo .nsp / .xci (Persona 5 Royal 1.0.0) y prod.keys.",
+                    "Choose your Persona 5 Royal 1.0.0 .nsp / .xci and prod.keys.");
+            playLabel = t("ELEGIR JUEGO", "CHOOSE GAME");
+        } else if (wrongBuild() != null) {
+            warn = true;
+            title = t("VERSIÓN NO COMPATIBLE", "UNSUPPORTED BUILD");
+            body = Lang.f("exefs/main build %s no es P5R 1.0.0 base.",
+                    "exefs/main build %s is not base P5R 1.0.0.", wrongBuild());
+            playLabel = t("REINTENTAR", "CHECK AGAIN");
+        } else {
+            title = t("LISTO PARA JUGAR", "READY TO PLAY");
+            String drv = activeDriver();
+            body = drv.isEmpty() ? dataDir().getPath()
+                    : (dataDir().getName() + " · " + drv);
+            playLabel = t("JUGAR  ▶", "PLAY  ▶");
+        }
+
+        heroPlay.setText(playLabel);
+        heroPlay.setWarningStyle(warn);
+        pinnedPlay.setText(playLabel);
+        pinnedPlay.setWarningStyle(warn);
+
+        heroStatusCard.setHighlight(warn);
+        heroStatusTitle.setTextColor(warn ? P5Theme.ACID_YELLOW : P5Theme.PAPER_WHITE);
+        heroStatusTitle.setText(title);
+        heroStatusBody.setText(body);
+
+        railStatusText.setTextColor(warn ? P5Theme.ACID_YELLOW : P5Theme.MUTED_TEXT);
+        railStatusText.setText(warn ? ("! " + title) : ("● " + title));
+
+        if (gameSub != null) {
+            gameSub.setText(gameUri() != null ? gameName()
+                    : (hasData() ? t("Carpeta de datos: " + dataDir().getName(), "Data folder: " + dataDir().getName())
+                    : t("Ningún archivo elegido", "No game file selected")));
+        }
+        if (keysSub != null) {
+            keysSub.setText(hasKeys() ? t("prod.keys instalado", "prod.keys installed")
+                    : t("prod.keys no encontrado", "prod.keys not installed"));
         }
     }
+
+    // ---- Dialogs & Activity results ----
 
     void tell(String title, String message) {
-        new AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null).show();
+        P5Views.showMessageDialog(this, title, message, "OK", null, null, null, null);
     }
 
     void askImport() {
-        new AlertDialog.Builder(this)
-                .setTitle(t("Importar partidas", "Import saves"))
-                .setMessage(t("Elige un archivo ZIP o una carpeta con partidas de Persona 5 Royal (las carpetas DATA01, "
-                                + "DATA02... y SYSTEM, como las exporta JKSV o Checkpoint, o el ZIP que exporta este botón). "
-                                + "Antes se guarda una copia de tus partidas actuales.",
-                        "Pick a ZIP file or a folder with Persona 5 Royal saves (the DATA01, DATA02... and SYSTEM folders, "
-                                + "as JKSV or Checkpoint export them, or the ZIP the Export button makes). Your current saves "
-                                + "are copied aside first."))
-                .setPositiveButton(t("Archivo ZIP", "ZIP file"), new DialogInterface.OnClickListener() {
+        P5Views.showMessageDialog(this,
+                t("Importar partidas", "Import Saves"),
+                t("Elige un archivo ZIP o una carpeta con partidas de Persona 5 Royal (DATA01, DATA02... y SYSTEM). Se guarda copia de seguridad de tus partidas actuales.",
+                        "Pick a ZIP file or folder with Persona 5 Royal saves (DATA01, DATA02... and SYSTEM). Your current saves are backed up first."),
+                t("ZIP", "ZIP FILE"),
+                new Runnable() {
                     @Override
-                    public void onClick(DialogInterface d, int which) {
+                    public void run() {
                         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                         i.addCategory(Intent.CATEGORY_OPENABLE);
                         i.setType("*/*");
-                        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip",
-                                "application/x-zip-compressed", "application/octet-stream"});
+                        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                                "application/zip", "application/x-zip-compressed", "application/octet-stream"});
                         startActivityForResult(i, PICK_ZIP);
                     }
-                })
-                .setNeutralButton(t("Carpeta", "Folder"), new DialogInterface.OnClickListener() {
+                },
+                t("CARPETA", "FOLDER"),
+                new Runnable() {
                     @Override
-                    public void onClick(DialogInterface d, int which) {
+                    public void run() {
                         startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_FOLDER);
                     }
-                })
-                .setNegativeButton(t("Cancelar", "Cancel"), null)
-                .show();
+                },
+                t("CANCELAR", "CANCEL"));
     }
 
     @Override
@@ -803,6 +1467,10 @@ public class Launcher extends Activity {
             onIconPicked(data.getData());
             return;
         }
+        if (request == PICK_WALLPAPER) {
+            onWallpaperPicked(data.getData());
+            return;
+        }
         if (request == PICK_DRIVER) {
             importDriver(data.getData());
             return;
@@ -816,8 +1484,8 @@ public class Launcher extends Activity {
                     : request == PICK_FOLDER ? SaveFiles.importTree(getContentResolver(), data.getData()) : null;
             if (r == null) {
                 tell(t("No hay partidas", "No saves found"),
-                        t("Ahí no encontré partidas de Persona 5 Royal: busca las carpetas DATA01, DATA02... o SYSTEM.",
-                                "No Persona 5 Royal saves there: look for the DATA01, DATA02... or SYSTEM folders."));
+                        t("Ahí no encontré partidas de Persona 5 Royal: busca DATA01, DATA02... o SYSTEM.",
+                                "No Persona 5 Royal saves found there: look for DATA01, DATA02... or SYSTEM."));
                 return;
             }
             String slots = r.slots.isEmpty() ? t("solo ajustes del sistema", "system settings only")
@@ -834,13 +1502,17 @@ public class Launcher extends Activity {
 
     void exportSaves() {
         try {
-            java.io.File out = SaveFiles.export();
-            // Listed at once by the file pickers and the Files app (written straight to disk, it would wait for a scan).
-            if (out != null) android.media.MediaScannerConnection.scanFile(this, new String[] {out.getPath()}, null, null);
-            if (out == null) tell(t("No hay partidas", "No saves"), t("Todavía no hay partidas guardadas.", "There are no saves yet."));
-            else tell(t("Partidas exportadas", "Saves exported"),
-                    Lang.f("Guardadas en Descargas/%s. Se importan tal cual con el botón Importar.",
-                            "Saved to Download/%s. The Import button takes it back as is.", out.getName()));
+            File out = SaveFiles.export();
+            if (out != null) {
+                android.media.MediaScannerConnection.scanFile(this, new String[] {out.getPath()}, null, null);
+            }
+            if (out == null) {
+                tell(t("No hay partidas", "No saves"), t("Todavía no hay partidas guardadas.", "There are no saves yet."));
+            } else {
+                tell(t("Partidas exportadas", "Saves exported"),
+                        Lang.f("Guardadas en Descargas/%s. Se importan tal cual con el botón Importar.",
+                                "Saved to Download/%s. Use Import to restore.", out.getName()));
+            }
         } catch (Exception e) {
             tell(t("No se pudo exportar", "Export failed"), String.valueOf(e.getMessage()));
         }
@@ -862,7 +1534,8 @@ public class Launcher extends Activity {
         }
     }
 
-    // config.txt: KEY=value lines, in order.
+    // ---- config.txt persistence (identical format to original Launcher) ----
+
     static Map<String, String> readConfig(File f) {
         Map<String, String> out = new LinkedHashMap<>();
         if (!f.canRead()) return out;
@@ -934,11 +1607,7 @@ public class Launcher extends Activity {
 
     int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
-    // ---- custom GPU driver ------------------------------------------------------------------------------------
-    // <files>/gpu_driver/<name>.so and active.txt (its name): the runtime opens it with libadrenotools instead of the
-    // system Vulkan driver (platform_android.cpp). A .so, or a .zip holding one (the AdrenoTools driver packages:
-    // the .so and a meta.json whose "libraryName" is the file to load).
-    TextView driverName;
+    // ---- custom GPU driver ----
 
     File driverDir() {
         File d = new File(getFilesDir(), "gpu_driver");
@@ -947,7 +1616,7 @@ public class Launcher extends Activity {
     }
 
     String activeDriver() {
-        try (java.io.BufferedReader r = new java.io.BufferedReader(new FileReader(new File(driverDir(), "active.txt")))) {
+        try (BufferedReader r = new BufferedReader(new FileReader(new File(driverDir(), "active.txt")))) {
             String line = r.readLine();
             return line == null ? "" : line.trim();
         } catch (Exception e) {
@@ -956,16 +1625,16 @@ public class Launcher extends Activity {
     }
 
     void showDriver() {
-        if (driverName == null) return;
+        if (driverSub == null) return;
         String a = activeDriver();
-        driverName.setText(a.isEmpty() ? t("Driver de GPU: del sistema", "GPU driver: system")
-                : Lang.f("Driver de GPU: %s", "GPU driver: %s", a));
+        driverSub.setText(a.isEmpty() ? t("Driver del sistema", "System driver") : a);
     }
 
     void removeDriver() {
         File[] files = driverDir().listFiles();
         if (files != null) for (File f : files) f.delete();
         showDriver();
+        updateReadiness();
         Toast.makeText(this, t("Driver del sistema activado", "System driver restored"), Toast.LENGTH_LONG).show();
     }
 
@@ -1018,10 +1687,10 @@ public class Launcher extends Activity {
                 w.write(libName + "\n");
             }
             showDriver();
+            updateReadiness();
             tell(t("Driver importado", "Driver imported"),
-                    Lang.f("%s\n\nCierra el juego por completo y abrelo otra vez. Para volver al driver del sistema pulsa Quitar.",
-                            "%s\n\nClose the game completely and start it again. To go back to the system driver press Remove.",
-                            libName));
+                    Lang.f("%s\n\nCierra la app por completo y ábrela de nuevo.",
+                            "%s\n\nClose the app completely and start it again.", libName));
         } catch (Exception e) {
             tell(t("No se pudo importar el driver", "Driver import failed"), String.valueOf(e.getMessage()));
         }
@@ -1040,7 +1709,7 @@ public class Launcher extends Activity {
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             }
             Toast.makeText(this, t("Traducción instalada en mods/translation/ (PATCH1.CPK)",
-                    "Translation installed to mods/translation/ (as PATCH1.CPK)"), Toast.LENGTH_LONG).show();
+                    "Translation installed to mods/translation/ (PATCH1.CPK)"), Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             Toast.makeText(this, t("Error al importar CPK: " + e.getMessage(),
                     "Error importing CPK: " + e.getMessage()), Toast.LENGTH_LONG).show();
@@ -1098,31 +1767,12 @@ public class Launcher extends Activity {
             share.setType("text/plain");
             share.putExtra(Intent.EXTRA_STREAM, logUri);
             share.putExtra(Intent.EXTRA_SUBJECT, "Persona 5 Royal Debug Log");
-            share.setClipData(android.content.ClipData.newRawUri("Log", logUri));
+            share.setClipData(ClipData.newRawUri("Log", logUri));
             share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(share, t("Compartir archivo de registros", "Share log file")));
         } catch (Exception e) {
             Toast.makeText(this, t("Error al exportar registros: " + e.getMessage(),
                     "Error exporting logs: " + e.getMessage()), Toast.LENGTH_LONG).show();
         }
-    }
-
-    void addRow(LinearLayout root, String label, String button, View.OnClickListener click) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(4), 0, dp(4));
-        TextView name = new TextView(this);
-        name.setText(label);
-        name.setTextColor(Color.WHITE);
-        name.setTextSize(17);
-        row.addView(name, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button b = new Button(this);
-        b.setAllCaps(false);
-        b.setMinWidth(dp(180));
-        b.setText(button);
-        b.setOnClickListener(click);
-        row.addView(b);
-        root.addView(row);
     }
 }
