@@ -127,6 +127,7 @@ public class Launcher extends Activity {
 
     private Bitmap currentWallpaperBmp;
     private boolean hasPausedOnce = false;
+    private P5Views.IntroOverlayView introOverlay;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
@@ -150,6 +151,22 @@ public class Launcher extends Activity {
     static final class Api30Helper {
         static boolean isExternalStorageManager() {
             return Environment.isExternalStorageManager();
+        }
+    }
+
+    static final class Api31Helper {
+        static void hookSplashExit(Activity activity, final Runnable onReady) {
+            try {
+                activity.getSplashScreen().setOnExitAnimationListener(
+                        new android.window.SplashScreen.OnExitAnimationListener() {
+                            @Override
+                            public void onSplashScreenExit(android.window.SplashScreenView splashView) {
+                                splashView.remove();
+                                onReady.run();
+                            }
+                        });
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -445,14 +462,52 @@ public class Launcher extends Activity {
         }
         hideSystemBars();
         initOptions();
-        buildUi(state == null);
+        boolean playIntro = (state == null);
+        buildUi(playIntro);
         loadWallpaper();
+        if (playIntro && Build.VERSION.SDK_INT >= 31) {
+            Api31Helper.hookSplashExit(this, new Runnable() {
+                @Override
+                public void run() { startPendingIntro(); }
+            });
+        }
+    }
+
+    private void startPendingIntro() {
+        if (introOverlay != null) {
+            final P5Views.IntroOverlayView v = introOverlay;
+            introOverlay = null;
+            v.post(new Runnable() {
+                @Override
+                public void run() { v.play(); }
+            });
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            hideSystemBars();
+            if (introOverlay != null) {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    // Fallback if OS skipped splash exit callback (e.g., warm launch)
+                    introOverlay.postDelayed(new Runnable() {
+                        @Override
+                        public void run() { startPendingIntro(); }
+                    }, 180);
+                } else {
+                    startPendingIntro();
+                }
+            }
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         hasPausedOnce = true;
+        if (bgView != null) bgView.setHostResumed(false);
     }
 
     @Override
@@ -460,8 +515,9 @@ public class Launcher extends Activity {
         super.onResume();
         hideSystemBars();
         refresh();
-        if (hasPausedOnce && bgView != null) {
-            bgView.triggerSlash();
+        if (bgView != null) {
+            bgView.setHostResumed(true);
+            if (hasPausedOnce) bgView.triggerSlash();
         }
     }
 
@@ -722,13 +778,9 @@ public class Launcher extends Activity {
         }
 
         if (playIntro) {
-            final P5Views.IntroOverlayView intro = new P5Views.IntroOverlayView(this);
-            root.addView(intro, new FrameLayout.LayoutParams(
+            introOverlay = new P5Views.IntroOverlayView(this);
+            root.addView(introOverlay, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-            intro.post(new Runnable() {
-                @Override
-                public void run() { intro.play(); }
-            });
         }
 
         setContentView(root);
@@ -901,10 +953,11 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        scroll.setClipToPadding(false);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(2), 0, dp(16));
+        list.setPadding(0, dp(6), 0, dp(16));
 
         for (Option o : options) {
             if (o.tab == tab) addOptionRow(list, o);
@@ -929,9 +982,11 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(2), 0, dp(16));
+        list.setPadding(0, dp(6), 0, dp(16));
 
         // Top action row: Move Controls Editor
         addActionRow(list,
@@ -971,9 +1026,11 @@ public class Launcher extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(2), 0, dp(16));
+        list.setPadding(0, dp(6), 0, dp(16));
 
         gameSub = addActionRow(list,
                 t("Archivo del juego (.nsp / .xci)", "Game File (.nsp / .xci)"),

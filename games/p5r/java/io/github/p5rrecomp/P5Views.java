@@ -969,9 +969,11 @@ final class P5Views {
         final ScrollView sc = new ScrollView(ctx);
         sc.setOverScrollMode(View.OVER_SCROLL_NEVER);
         sc.setVerticalScrollBarEnabled(false);
+        sc.setVerticalFadingEdgeEnabled(true);
+        sc.setFadingEdgeLength(P5Theme.dpx(ctx, 14));
         LinearLayout list = new LinearLayout(ctx);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, P5Theme.dpx(ctx, 10), 0, P5Theme.dpx(ctx, 4));
+        list.setPadding(0, P5Theme.dpx(ctx, 8), 0, P5Theme.dpx(ctx, 8));
 
         for (int i = 0; i < labels.length; i++) {
             final int idx = i;
@@ -1081,7 +1083,8 @@ final class P5Views {
     // ---- 12. Cold-Start Twin-Blade Diagonal Cut Intro Overlay (Option 1 + Subtle Chakeyy's Version) ----
 
     static final class IntroOverlayView extends View {
-        private float progress = 0f; // 0..1 across ~620ms
+        private float progress = 0f; // 0..1 across ~920ms
+        private boolean started = false;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path bladePath = new Path();
@@ -1097,10 +1100,12 @@ final class P5Views {
         }
 
         void play() {
+            if (started) return;
+            started = true;
             if (anim != null) anim.cancel();
             progress = 0f;
             anim = ValueAnimator.ofFloat(0f, 1f);
-            anim.setDuration(620);
+            anim.setDuration(920);
             anim.setInterpolator(new LinearInterpolator());
             anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
                 @Override
@@ -1150,8 +1155,8 @@ final class P5Views {
             float nx = dy / len;
             float ny = -dx / len;
 
-            // Phase 1 split envelope (t = 0.42 -> 1.0)
-            float splitRaw = Math.max(0f, Math.min(1f, (progress - 0.42f) / 0.58f));
+            // Phase 1 split envelope (t = 0.48 -> 1.0)
+            float splitRaw = Math.max(0f, Math.min(1f, (progress - 0.48f) / 0.52f));
             // Smooth cubic accelerate-out feel so the blades snap sharply open
             float splitEase = splitRaw * splitRaw * (1.8f - 0.8f * splitRaw);
             if (splitEase > 1f) splitEase = 1f;
@@ -1233,9 +1238,9 @@ final class P5Views {
             }
             c.restore();
 
-            // Razor-thin seam flash right before the blades part (t = 0.34 -> 0.46)
-            if (progress >= 0.34f && progress <= 0.46f) {
-                float f = 1f - Math.abs((progress - 0.40f) / 0.06f);
+            // Razor-thin seam flash right before the blades part (t = 0.41 -> 0.53)
+            if (progress >= 0.41f && progress <= 0.53f) {
+                float f = 1f - Math.abs((progress - 0.47f) / 0.06f);
                 int flashA = Math.round(255 * Math.max(0f, Math.min(1f, f)));
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(3.5f * d);
@@ -1243,21 +1248,21 @@ final class P5Views {
                 c.drawLine(xTop, 0, xBot, h, paint);
             }
 
-            // Center P5 Star emblem + subtle "CHAKEYY'S VERSION" stamp (t = 0.0 -> 0.56)
-            if (progress < 0.56f) {
+            // Center P5 Star emblem + subtle "CHAKEYY'S VERSION" stamp (t = 0.0 -> 0.62)
+            if (progress < 0.62f) {
                 float emblemAlpha;
                 float starScale;
-                if (progress < 0.22f) {
-                    float u = progress / 0.22f;
+                if (progress < 0.18f) {
+                    float u = progress / 0.18f;
                     float ease = 1f - (1f - u) * (1f - u);
                     starScale = 0.72f + 0.32f * ease; // 0.72 -> 1.04
-                    emblemAlpha = Math.min(1f, u * 1.4f);
-                } else if (progress < 0.38f) {
-                    float u = (progress - 0.22f) / 0.16f;
-                    starScale = 1.04f - 0.04f * u; // settle to 1.0
+                    emblemAlpha = Math.min(1f, u * 1.6f);
+                } else if (progress < 0.45f) {
+                    float u = Math.min(1f, (progress - 0.18f) / 0.12f);
+                    starScale = 1.04f - 0.04f * u; // settle to 1.0 and hold cleanly
                     emblemAlpha = 1f;
                 } else {
-                    float u = (progress - 0.38f) / 0.18f;
+                    float u = (progress - 0.45f) / 0.17f;
                     starScale = 1.0f + 0.14f * u;
                     emblemAlpha = Math.max(0f, 1f - u);
                 }
