@@ -276,8 +276,15 @@ void QueueSubmitCommands(CPU& c) {  // (NVNqueue*, int count, const NVNcommandHa
     if (KThread* self = self_thread(); self) {
         if (!self->is_replay) {
             self->is_replay = true;
-            plat::set_thread_priority(-10);
-            plat::place_fast_cores();
+            if (worker_enabled()) {
+                // With NX_REPLAY_THREAD=1, replay runs on the dedicated `nvn replay` host thread; keep the guest
+                // recording/submitting thread on m.main_non_replay ({0..6}, priority -6) so it runs fast on CPU 6
+                // without ever preempting `nvn replay` on CPU 7.
+                plat::pin_thread_tid_to_big_cores(self->host_tid, -6);
+            } else {
+                plat::set_thread_priority(-10);
+                plat::place_fast_cores();
+            }
         }
         plat::perf_hint_thread();  // any submitting/replay thread joins ADPF (perf_hint.cpp)
     }
