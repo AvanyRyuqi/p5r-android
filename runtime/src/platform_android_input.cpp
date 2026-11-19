@@ -45,6 +45,10 @@
 #include "platform_android.h"
 #include "touch_layout.h"
 
+namespace nx::nvn {
+void debug_request_capture();
+}  // namespace nx::nvn
+
 // Android input: game controllers and touch (split from platform_android.cpp).
 namespace nx::plat {
 
@@ -258,19 +262,9 @@ int32_t on_input(android_app*, AInputEvent* e) {
         const uint64_t now_hk = monotonic_ns();
         if (log_on && now_hk >= s_last_hotkey_ns + 2'000'000'000ull) {
             s_last_hotkey_ns = now_hk;
-            const std::string root = data_root();
-            if (!root.empty()) {
-                if (FILE* f = fopen_utf8(root + "/trace_draws", "wb")) {
-                    std::fputs("1\n", f);
-                    std::fclose(f);
-                }
-                if (FILE* f = fopen_utf8(root + "/dump_frames", "wb")) {
-                    std::fputs("1 1\n", f);
-                    std::fclose(f);
-                }
-                nx::log("debug hotkey (3-finger tap): armed trace_draws + dump_frames");
-                show_toast("Debug trace captured");
-            }
+            nx::nvn::debug_request_capture();
+            nx::log("debug hotkey (3-finger tap): armed trace_draws + dump_hud + dump_frames");
+            show_toast("Debug trace captured");
         }
         return 1;
     }
