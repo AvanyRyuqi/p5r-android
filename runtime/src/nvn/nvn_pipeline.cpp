@@ -374,7 +374,7 @@ PipelineKey canonical_key(const PipelineKey& in);
 struct PipeBuild {
     VkPipelineShaderStageCreateInfo stages[2]{};
     VkSpecializationInfo spec_info{};
-    float uw_x_value = 1.0f;
+    float uw_x_values[2] = {1.0f, 0.0f};
     uint32_t nstages = 0;
     std::vector<VkVertexInputAttributeDescription> attrs;
     std::vector<VkVertexInputBindingDescription> binds;
@@ -882,6 +882,7 @@ PipelineKey canonical_key(const PipelineKey& in) {
     k.alpha_to_coverage = (!dc.alpha_to_coverage_enable && in.alpha_to_coverage) ? 1 : 0;
     k.restart = dc.primitive_restart_enable ? 0 : in.restart;
     k.uw_x = in.uw_x;
+    k.uw_x_off = in.uw_x_off;
     return k;
 }
 
@@ -893,7 +894,7 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     std::memcpy(B.color_formats, key.color_formats, sizeof B.color_formats);
     VkPipelineShaderStageCreateInfo(&stages)[2] = B.stages;
     VkSpecializationInfo& spec_info = B.spec_info;
-    float& uw_x_value = B.uw_x_value;
+    float (&uw_x_values)[2] = B.uw_x_values;
     uint32_t& nstages = B.nstages;
     uint8_t int_kinds[16] = {};
     for (uint32_t a = 0; a < key.attrib_count && a < 16; a++) int_kinds[a] = uint8_t(vertex_int_kind(key.attribs[a].format));
@@ -920,10 +921,14 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
         st.stage = VkShaderStageFlagBits(stage_bit(s->stage));
         st.module = module_of(s, s == key.vs ? int_kinds : nullptr, s == key.fs ? unwritten : 0);
         st.pName = "main";
-        if (s == key.vs && key.uw_x > 0) {  // NX_ULTRAWIDE: constant 0 of the patched vertex module
-            static VkSpecializationMapEntry entry{0, 0, sizeof(float)};
-            spec_info = {1, &entry, sizeof(float), &uw_x_value};
-            uw_x_value = key.uw_x;
+        if (s == key.vs && key.uw_x > 0) {  // NX_ULTRAWIDE: spec0 (x scale) & spec1 (x offset) of patched vertex module
+            static const VkSpecializationMapEntry entries[2] = {
+                {0, 0, sizeof(float)},
+                {1, sizeof(float), sizeof(float)},
+            };
+            spec_info = {2, entries, sizeof(uw_x_values), uw_x_values};
+            uw_x_values[0] = key.uw_x;
+            uw_x_values[1] = key.uw_x_off;
             st.pSpecializationInfo = &spec_info;
         }
     }
