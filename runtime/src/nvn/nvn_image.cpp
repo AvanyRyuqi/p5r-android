@@ -85,14 +85,14 @@ bool hud_1080_texture(const Texture& t) {
         const char* e = std::getenv("NX_HUD_1080");
         return e && e[0] == '1';
     }();
-    if (!on || t.target != 1 || t.width != 1280 || t.height != 720 || !(t.flags & 8) || t.stride || t.levels > 1 ||
+    if (!on || t.target != 1 || (!t.uw && t.width != 1280) || t.height != 720 || !(t.flags & 8) || t.stride || t.levels > 1 ||
         t.samples > 1)
         return false;
     static std::map<std::pair<uint32_t, uint32_t>, bool> seen;
     if (!seen[{t.format, t.flags}]) {
         seen[{t.format, t.flags}] = true;
-        log("nvn: hud 1080: 1280x720 targets of format %#x (flags %#x) made at %dx%d", t.format, t.flags,
-            hud_up(1280), hud_up(720));
+        log("nvn: hud 1080: %ux720 targets of format %#x (flags %#x) made at %dx%d", t.width, t.format, t.flags,
+            hud_up(int32_t(t.width)), hud_up(720));
     }
     return true;
 }
@@ -145,12 +145,16 @@ int32_t low_3d_den() {
 
 bool low_3d_texture(const Texture& t) {
     if (!low_3d_on() || t.stride) return false;
-    // P5R 3D scene render targets (960x540) and post-process chain targets (480x270, 240x135) in handheld mode
+    // P5R 3D scene render targets (960x540) and post-process chain targets (480x270, 240x135) in handheld mode,
+    // including widened ultrawide targets (t.uw == true, e.g. 1200x540 -> 1000x450 at 540p / 900x405 at 480p).
     if (t.target == 1 && t.levels <= 1 && t.samples <= 1) {
-        if ((t.width == 960 && t.height == 540) ||
-            (t.width == 480 && t.height == 270) ||
-            (t.width == 240 && t.height == 135))
+        if (t.uw) {
+            if (t.height == 540 || t.height == 270 || t.height == 135) return true;
+        } else if ((t.width == 960 && t.height == 540) ||
+                   (t.width == 480 && t.height == 270) ||
+                   (t.width == 240 && t.height == 135)) {
             return true;
+        }
     }
     return false;
 }
@@ -218,7 +222,7 @@ GpuImage* image_of(uint64_t guest) {
     img->width = std::max(1u, t->width);
     img->height = (t->target == 0 || t->target == 3) && !one_d ? 1u : std::max(1u, t->height);
     img->levels = std::max(1u, t->levels);
-    if (hud_1080_texture(*t)) img->hud = true, img->width = uint32_t(hud_up(1280)), img->height = uint32_t(hud_up(720));
+    if (hud_1080_texture(*t)) img->hud = true, img->width = uint32_t(hud_up(int32_t(t->width))), img->height = uint32_t(hud_up(720));
     if (low_3d_texture(*t)) {
         img->low_3d = true;
         img->width = std::max(1u, uint32_t(low_3d_down(int32_t(t->width))));

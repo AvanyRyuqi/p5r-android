@@ -1191,7 +1191,7 @@ uint32_t compute_dont_care_color_mask(const Targets& tt, const ShaderInfo* vs, c
         vp_w = float(g_state.viewport[2]), vp_h = float(g_state.viewport[3]);
         if (g_uw_wide) {
             int32_t x = int32_t(vp_x), w = int32_t(vp_w);
-            uw_span(x, w, extent.width);
+            uw_span(x, w, (g_hud_target || g_low_3d_target) ? UINT32_MAX : extent.width);
             vp_x = float(x), vp_w = float(w);
         }
         if (g_hud_target) {
@@ -1211,7 +1211,7 @@ uint32_t compute_dont_care_color_mask(const Targets& tt, const ShaderInfo* vs, c
         sc_h = std::max(0, g_state.scissor[3]);
         if (g_uw_wide) {
             int32_t x = int32_t(sc_x), w = int32_t(sc_w);
-            uw_span(x, w, extent.width);
+            uw_span(x, w, (g_hud_target || g_low_3d_target) ? UINT32_MAX : extent.width);
             sc_x = x, sc_w = w;
         }
         if (g_hud_target) {
@@ -1655,6 +1655,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         bool indexed = false;
         bool textures_empty = false;
         bool ui_draw = false;
+        bool uw_scaled = false;
     };
     static constexpr size_t kPipeFastBuckets = 256;
     static constexpr int kPipeFastWays = 4;
@@ -1726,8 +1727,24 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     if (uw_on() && s_uw_cam_patch && !g_uw_wide && s_cached_c0_is_bgra8_rt) {
         uw_ui_vertex_shader(vs);
     }
+    bool uw_scaled = false;
+    if (g_uw_wide) {
+        // NX_UW_UI=learn: only learned UI vertex shaders; default: screen-space UI (!depth_test) plus P5R 1280x720
+        // RGBA8 UI / 3D-in-UI passes (live_ui_draw(tt), e.g. Joker's 3D bust in STATS and battle/menu portraits).
+        const bool ui_pick = !s_uw_cam_patch ||
+                             (s_uw_ui_learn ? uw_is_ui_vertex_shader(vs) : (!g_state.depth.depth_test || ui_draw));
+        if (ui_pick && uw_vs_scaled(vs)) {
+            bool samples_wide = false;
+            const uint64_t count = indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]);
+            if (count <= 6)
+                for (const ResolvedTexture& r : g_textures.active_resolved())
+                    if (r.texture)
+                        if (GpuImage* si = image_of(r.texture); si && si->uw) samples_wide = true;
+            uw_scaled = !samples_wide;
+        }
+    }
     static const bool s_diag_stats_on = std::getenv("NX_RESTART_STATS") != nullptr || std::getenv("NX_FRAME_DRAWS") != nullptr;
-    const bool allow_fast_pipe = !g_uw_wide && !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
+    const bool allow_fast_pipe = !live_flags() && !__builtin_expect(s_uw_trace.active, 0) && !__builtin_expect(s_diag_stats_on, 0);
     const size_t pf_bucket = (((reinterpret_cast<uintptr_t>(vs) >> 4) ^ (reinterpret_cast<uintptr_t>(fs) >> 3) ^
                                (reinterpret_cast<uintptr_t>(fs) >> 11) ^ (s_cached_pipe_hash_lo >> 17) ^ eff_mode) &
                               (kPipeFastBuckets - 1));
@@ -1745,7 +1762,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
                 e.textures_empty == tex_empty &&
-                e.ui_draw == ui_draw) {
+                e.ui_draw == ui_draw &&
+                e.uw_scaled == uw_scaled) {
                 pipeline = e.pipeline;
                 g_draw_prof.pipe_fast_hits++;
                 if (w > 0) {
@@ -1786,19 +1804,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             const Texture* lt = get<Texture>(t.colors[0]);
             if (lt && lt->format == 0x25 && (lt->flags & 8)) uw_ui_vertex_shader(vs);
         }
-        // NX_UW_UI=learn: only the vertex shaders learned above; default: every draw without depth test (screen-space UI).
-        const bool ui_pick = !s_uw_cam_patch || (s_uw_ui_learn ? uw_is_ui_vertex_shader(vs) : !g_state.depth.depth_test);
-        if (g_uw_wide && uw_vs_scaled(vs) && ui_pick) {
-            // A short draw (a triangle or a quad) that samples a widened render target is a screen-space pass (post
-            // chain, composite): it already covers the widened target.
-            bool samples_wide = false;
-            const uint64_t count = indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]);
-            if (count <= 6)
-                for (const ResolvedTexture& r : g_textures.active_resolved())
-                    if (r.texture)
-                        if (GpuImage* si = image_of(r.texture); si && si->uw) samples_wide = true;
-            if (!samples_wide) key.uw_x = 1.0f / uw_factor();
-        }
+        if (uw_scaled) key.uw_x = 1.0f / uw_factor();
         if (uw_on() && __builtin_expect(s_uw_trace.active, 0)) {  // NX_UW_TRACE=<first draw>:<count>: draws (wide = a widened target)
             if (g_stats.total >= s_uw_trace.from && g_stats.total < s_uw_trace.from + s_uw_trace.count) {
                 GpuImage* wi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : nullptr;
@@ -1875,7 +1881,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             PipeMru* ways = s_pipe_mru[pf_bucket];
             for (int j = kPipeFastWays - 1; j > 0; j--) ways[j] = ways[j - 1];
             ways[0] = {vs, fs, s_cached_formats_hash, s_cached_pipe_hash_lo, s_cached_pipe_hash_hi,
-                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw};
+                       layout.layout, pipeline, eff_mode, indexed, tex_empty, ui_draw, uw_scaled};
         }
     }
     const uint64_t t_after_pipe = draw_fast_ticks();
@@ -1929,15 +1935,16 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     if (g_state.has_scissor)
         sc = {{std::max(0, g_state.scissor[0]), std::max(0, g_state.scissor[1])},
               {uint32_t(std::max(0, g_state.scissor[2])), uint32_t(std::max(0, g_state.scissor[3]))}};
-    if (g_uw_wide) {  // NX_ULTRAWIDE: the guest's 16:9 pixel spans, widened
+    if (g_uw_wide) {  // NX_ULTRAWIDE: the guest's 16:9 pixel spans, widened (clamp only after low_3d/hud scaling)
+        const uint32_t uw_limit = (g_hud_target || g_low_3d_target) ? UINT32_MAX : g_pass_extent.width;
         if (g_state.has_viewport) {
             int32_t x = int32_t(vp.x), w = int32_t(vp.width);
-            uw_span(x, w, g_pass_extent.width);
+            uw_span(x, w, uw_limit);
             vp.x = float(x), vp.width = float(w);
         }
         if (g_state.has_scissor) {
             int32_t x = sc.offset.x, w = int32_t(sc.extent.width);
-            uw_span(x, w, g_pass_extent.width);
+            uw_span(x, w, uw_limit);
             sc.offset.x = x, sc.extent.width = uint32_t(w);
         }
     }
