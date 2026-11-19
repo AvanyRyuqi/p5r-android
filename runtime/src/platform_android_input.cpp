@@ -56,7 +56,9 @@ namespace nx::plat {
 
 namespace {
 std::mutex g_in;
-PadState g_pad_buttons;  // controller state
+PadState g_pad_buttons;      // controller stick state
+uint64_t g_key_buttons = 0;  // digital controller/keyboard button state (KeyEvent)
+uint64_t g_axis_buttons = 0; // analog hat/trigger button state (MotionEvent)
 enum Stick : uint8_t { kNoStick, kLeftStick, kRightStick };
 struct Touch {
     int32_t id;
@@ -190,9 +192,9 @@ int32_t on_input(android_app*, AInputEvent* e) {
         g_gamepad = true;
         note_controller(AInputEvent_getDeviceId(e));
         if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN)
-            g_pad_buttons.buttons |= b;
+            g_key_buttons |= b;
         else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP)
-            g_pad_buttons.buttons &= ~b;
+            g_key_buttons &= ~b;
         return 1;
     }
     if (type != AINPUT_EVENT_TYPE_MOTION) return 0;
@@ -224,17 +226,22 @@ int32_t on_input(android_app*, AInputEvent* e) {
         g_pad_buttons.ry = ry;
         float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0);
         float hy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
-        g_pad_buttons.buttons &= ~(kLeft | kRight | kUp | kDown | kZL | kZR);
-        if (hx < -0.5f) g_pad_buttons.buttons |= kLeft;
-        if (hx > 0.5f) g_pad_buttons.buttons |= kRight;
-        if (hy < -0.5f) g_pad_buttons.buttons |= kUp;
-        if (hy > 0.5f) g_pad_buttons.buttons |= kDown;
-        if (AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_LTRIGGER, 0) > 0.4f ||
-            AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0) > 0.4f)
-            g_pad_buttons.buttons |= kZL;
-        if (AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RTRIGGER, 0) > 0.4f ||
-            AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0) > 0.4f)
-            g_pad_buttons.buttons |= kZR;
+        uint64_t axis_buttons = 0;
+        if (hx < -0.5f) axis_buttons |= kLeft;
+        if (hx > 0.5f) axis_buttons |= kRight;
+        if (hy < -0.5f) axis_buttons |= kUp;
+        if (hy > 0.5f) axis_buttons |= kDown;
+        // Hysteresis prevents analog trigger chatter near the threshold, and keeping axis buttons separate from
+        // g_key_buttons prevents stick MotionEvents from clearing digital KeyEvent L2/R2/D-pad presses (Third Eye flicker).
+        constexpr float kTrigPress = 0.35f;
+        constexpr float kTrigRelease = 0.20f;
+        const float l_trig = std::max(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_LTRIGGER, 0),
+                                      AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0));
+        const float r_trig = std::max(AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RTRIGGER, 0),
+                                      AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0));
+        if (l_trig > ((g_axis_buttons & kZL) ? kTrigRelease : kTrigPress)) axis_buttons |= kZL;
+        if (r_trig > ((g_axis_buttons & kZR) ? kTrigRelease : kTrigPress)) axis_buttons |= kZR;
+        g_axis_buttons = axis_buttons;
         return 1;
     }
     if ((src & AINPUT_SOURCE_TOUCHSCREEN) != AINPUT_SOURCE_TOUCHSCREEN) return 0;
@@ -312,7 +319,7 @@ bool headless() {  // NX_HEADLESS (platform.h)
 
 void read_pad(PadState& p) {
     std::lock_guard lk(g_in);
-    p.buttons |= g_pad_buttons.buttons;
+    p.buttons |= g_key_buttons | g_axis_buttons;
     if (g_pad_buttons.lx || g_pad_buttons.ly) {
         p.lx = g_pad_buttons.lx;
         p.ly = g_pad_buttons.ly;
