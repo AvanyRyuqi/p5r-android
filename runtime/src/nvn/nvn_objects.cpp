@@ -317,7 +317,6 @@ void TextureInitialize(CPU& c) {  // NVNboolean (NVNtexture*, const NVNtextureBu
     t.pool = driver(c, "nvnTextureBuilderGetMemoryPool", {builder});
     t.offset = driver(c, "nvnTextureBuilderGetMemoryOffset", {builder});
     t.storage_size = texture_storage_size(c, builder);
-    t.guest_width = t.width;
     uw_widen_texture(t);  // NX_ULTRAWIDE: screen-sized render targets get the display's width
     // NX_TRACE_TEX_CALLER=<w>x<h>: the guest call chain of every texture made at that size (who sizes the targets).
     if (static const char* e = std::getenv("NX_TRACE_TEX_CALLER"); e) {
@@ -612,7 +611,7 @@ void TextureFlushTexels(CPU&) {}  // coherent: the writes above are what matters
         auto* t = get<Texture>(c.x[0]);       \
         c.x[0] = t ? uint64_t(t->field) : 0;  \
     }
-NX_TEXTURE_GETTER(TextureGetWidth, guest_width)
+NX_TEXTURE_GETTER(TextureGetWidth, width)
 NX_TEXTURE_GETTER(TextureGetHeight, height)
 NX_TEXTURE_GETTER(TextureGetDepth, depth)
 NX_TEXTURE_GETTER(TextureGetFormat, format)
