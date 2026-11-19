@@ -365,7 +365,7 @@ public class Launcher extends Activity {
         wallpaperFile().delete();
         loadWallpaper();
         updateWallpaperUi();
-        Toast.makeText(this, t("Fondo P5 restaurado", "Default P5 art restored"), Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, t("Fondo por defecto restaurado", "Default wallpaper restored"), Toast.LENGTH_SHORT).show();
     }
 
     void updateWallpaperUi() {
@@ -373,7 +373,7 @@ public class Launcher extends Activity {
         if (wpSub != null) {
             wpSub.setText(custom
                     ? t("Imagen personalizada activa", "Custom image active")
-                    : t("Arte P5 por defecto", "Default P5 procedural art"));
+                    : t("Fondo por defecto", "Default Wallpaper"));
         }
     }
 
@@ -994,7 +994,7 @@ public class Launcher extends Activity {
 
         wpSub = addActionRow(list,
                 t("Fondo del lanzador", "Launcher Wallpaper"),
-                t("Arte P5 por defecto", "Default P5 procedural art"),
+                t("Fondo por defecto", "Default Wallpaper"),
                 t("ELEGIR", "CHOOSE"),
                 new View.OnClickListener() {
                     @Override
