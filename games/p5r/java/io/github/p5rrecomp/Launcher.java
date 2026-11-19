@@ -363,6 +363,14 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"Activado (normal)", "Desactivado (más FPS)"},
                 new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 0));
+        options.add(new Option("NX_REPLAY_THREAD", "Hilo de replay asíncrono", "Async replay thread",
+                new String[] {"0", "1"},
+                new String[] {"Desactivado", "Activado (más FPS)"},
+                new String[] {"Off", "On (more FPS)"}, 0));
+        options.add(new Option("NX_ENABLE_LOG", "Registro de depuración (nx.log)", "Debug logging (nx.log)",
+                new String[] {"0", "1"},
+                new String[] {"Desactivado (más FPS)", "Activado"},
+                new String[] {"Off (more FPS)", "On"}, 0));
         options.add(new Option("NX_GAMEPAD_LAYOUT", "Botones del mando físico", "Physical gamepad buttons",
                 new String[] {"0", "1"},
                 new String[] {"Nintendo (A dcha, B abajo)", "Xbox / PC (A abajo, B dcha)"},
