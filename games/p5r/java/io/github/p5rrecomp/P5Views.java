@@ -37,6 +37,7 @@ final class P5Views {
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path bgSlash = new Path();
+        private final Path royalPoly = new Path();
         private static final float[] ANGLES = {-4.5f, 3.0f, -2.5f, 4.0f, -3.5f, 2.5f, -4.0f, 0f, 5.0f};
 
         CutTitleView(Context context) {
@@ -112,7 +113,6 @@ final class P5Views {
 
             // Row 2: Slanted "ROYAL" cut-paper ribbon tucked underneath
             float rx = 18 * d, ry = 36 * d, rw = 96 * d, rh = 18 * d;
-            Path royalPoly = new Path();
             P5Theme.setSlantedQuad(royalPoly, rx, ry, rx + rw, ry + rh, 5 * d, 5 * d);
             boxPaint.setColor(P5Theme.PAPER_WHITE);
             c.save();
@@ -141,6 +141,7 @@ final class P5Views {
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path mainPoly = new Path();
         private final Path backSlash = new Path();
+        private final Path tickPoly = new Path();
 
         NavTabView(Context context, String label, String subTag) {
             super(context);
@@ -226,10 +227,9 @@ final class P5Views {
                 c.drawPath(mainPoly, paint);
 
                 // Sharp crimson left tick bar
-                Path tick = new Path();
-                P5Theme.setSlantedQuad(tick, 4 * d, padV + 1 * d, 10 * d, h - padV - 1 * d, 2 * d, 2 * d);
+                P5Theme.setSlantedQuad(tickPoly, 4 * d, padV + 1 * d, 10 * d, h - padV - 1 * d, 2 * d, 2 * d);
                 paint.setColor(P5Theme.P5_RED);
-                c.drawPath(tick, paint);
+                c.drawPath(tickPoly, paint);
             }
 
             // Tab label
@@ -257,12 +257,16 @@ final class P5Views {
         private final boolean primary; // true = massive crimson/white PLAY slab, false = compact action button
         private boolean warningStyle = false;
         private boolean pressed = false;
+        private boolean heroSheenEnabled = false;
+        private float sheenPhase = 0f;
+        private ValueAnimator sheenAnim;
         private int fixedHeightDp;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path poly = new Path();
         private final Path shadowPoly = new Path();
         private final Path accentPoly = new Path();
+        private final Path sheenPoly = new Path();
 
         SlashButton(Context context, String text, boolean primary, int heightDp) {
             super(context);
@@ -283,8 +287,49 @@ final class P5Views {
         void setWarningStyle(boolean warn) {
             if (this.warningStyle != warn) {
                 this.warningStyle = warn;
+                updateSheenAnim();
                 invalidate();
             }
+        }
+
+        void enableHeroSheen(boolean enabled) {
+            this.heroSheenEnabled = enabled;
+            updateSheenAnim();
+        }
+
+        private void updateSheenAnim() {
+            boolean want = heroSheenEnabled && primary && !warningStyle && isAttachedToWindow();
+            if (want) {
+                if (sheenAnim == null) {
+                    sheenAnim = ValueAnimator.ofFloat(0f, 1f);
+                    sheenAnim.setDuration(3400);
+                    sheenAnim.setRepeatCount(ValueAnimator.INFINITE);
+                    sheenAnim.setInterpolator(new LinearInterpolator());
+                    sheenAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                        @Override
+                        public void onAnimationUpdate(ValueAnimator a) {
+                            sheenPhase = (Float) a.getAnimatedValue();
+                            invalidate();
+                        }
+                    });
+                }
+                if (!sheenAnim.isStarted()) sheenAnim.start();
+            } else {
+                if (sheenAnim != null) sheenAnim.cancel();
+                sheenPhase = 0f;
+            }
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            updateSheenAnim();
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            super.onDetachedFromWindow();
+            if (sheenAnim != null) sheenAnim.cancel();
         }
 
         @Override
@@ -334,9 +379,15 @@ final class P5Views {
         protected void onDraw(Canvas c) {
             float d = P5Theme.dp(getContext(), 1f);
             float w = getWidth(), h = getHeight();
-            float sh = pressed ? 1.5f * d : (primary ? 5.5f * d : 3.5f * d);
+            float breath = (heroSheenEnabled && primary && !warningStyle && !pressed)
+                    ? (1.1f * d * (float) Math.sin(sheenPhase * Math.PI * 2.0)) : 0f;
+            float sh = pressed ? 1.5f * d : (primary ? (5.2f * d + breath) : 3.5f * d);
             float skew = (primary ? 14f : 8f) * d;
-            float l = 2 * d, t = 2 * d, r = w - sh - 2 * d, b = h - sh - 2 * d;
+            float l = 2 * d, t = 2 * d, r = w - 6.5f * d - 2 * d, b = h - 6.5f * d - 2 * d;
+            if (!primary) {
+                r = w - sh - 2 * d;
+                b = h - sh - 2 * d;
+            }
 
             // Hard 0px-blur offset shadow
             P5Theme.setSlantedQuad(shadowPoly, l + sh, t + sh, r + sh, b + sh, skew, skew);
@@ -379,6 +430,24 @@ final class P5Views {
                 accentPoly.close();
                 paint.setColor(pressed ? P5Theme.P5_RED : P5Theme.PAPER_WHITE);
                 c.drawPath(accentPoly, paint);
+
+                // Subtle periodic diagonal sheen sweep across hero PLAY button
+                if (heroSheenEnabled && !pressed && sheenPhase < 0.28f) {
+                    float u = sheenPhase / 0.28f;
+                    float sx = l - 36f * d + (r - l + 72f * d) * u;
+                    float sw = 24f * d;
+                    c.save();
+                    c.clipPath(poly);
+                    sheenPoly.reset();
+                    sheenPoly.moveTo(sx + skew, t);
+                    sheenPoly.lineTo(sx + skew + sw, t);
+                    sheenPoly.lineTo(sx + sw, b);
+                    sheenPoly.lineTo(sx, b);
+                    sheenPoly.close();
+                    paint.setColor(Color.argb(62, 246, 245, 240));
+                    c.drawPath(sheenPoly, paint);
+                    c.restore();
+                }
             }
 
             // Crisp border
@@ -1080,23 +1149,19 @@ final class P5Views {
         frame.playPopIn();
     }
 
-    // ---- 12. Cold-Start Twin-Blade Diagonal Cut Intro Overlay (Option 1 + Subtle Chakeyy's Version) ----
+    // ---- 12. Cold-Start Twin-Blade Diagonal Cut Intro Overlay ----
 
     static final class IntroOverlayView extends View {
         private float progress = 0f; // 0..1 across ~920ms
         private boolean started = false;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path bladePath = new Path();
         private final Path edgePath = new Path();
         private final Path starPath = new Path();
-        private final Path tickPath = new Path();
         private ValueAnimator anim;
 
         IntroOverlayView(Context context) {
             super(context);
-            textPaint.setTypeface(P5Theme.monoBold());
-            textPaint.setTextAlign(Paint.Align.CENTER);
         }
 
         void play() {
@@ -1268,8 +1333,8 @@ final class P5Views {
                 }
 
                 float cx = w * 0.5f;
-                float cy = h * 0.44f;
-                float outerR = Math.min(w, h) * 0.175f;
+                float cy = h * 0.50f;
+                float outerR = Math.min(w, h) * 0.185f;
                 float innerR = outerR * 0.42f;
                 int a = Math.round(255 * emblemAlpha);
 
@@ -1301,26 +1366,90 @@ final class P5Views {
                 paint.setColor(Color.argb(a, 10, 10, 12));
                 c.drawPath(starPath, paint);
                 c.restore();
-
-                // Subtle "CHAKEYY'S VERSION" stamp underneath (appears cleanly after star punch)
-                float tagFade = Math.max(0f, Math.min(1f, (progress - 0.08f) / 0.14f)) * emblemAlpha;
-                if (tagFade > 0.01f) {
-                    String tag = "CHAKEYY'S VERSION";
-                    textPaint.setTextSize(10.5f * d);
-                    float tw = textPaint.measureText(tag);
-                    float ty = cy + outerR + 26f * d;
-
-                    // Tiny slanted crimson tick just left of the subtle signature
-                    float tickL = cx - tw * 0.5f - 12f * d;
-                    P5Theme.setSlantedQuad(tickPath, tickL, ty - 8.5f * d, tickL + 6f * d, ty + 1f * d, 2.5f * d, 2.5f * d);
-                    paint.setStyle(Paint.Style.FILL);
-                    paint.setColor(Color.argb(Math.round(230 * tagFade), 228, 0, 18));
-                    c.drawPath(tickPath, paint);
-
-                    textPaint.setColor(Color.argb(Math.round(200 * tagFade), 246, 245, 240));
-                    c.drawText(tag, cx + 3f * d, ty, textPaint);
-                }
             }
+        }
+    }
+
+    // ---- 13. Snappy Diagonal P5 Launch Wipe Overlay (on PLAY) ----
+
+    static final class LaunchSlashOverlayView extends View {
+        private float progress = 0f;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path fillPath = new Path();
+        private final Path redPath = new Path();
+        private final Path whitePath = new Path();
+        private ValueAnimator anim;
+
+        LaunchSlashOverlayView(Context context) {
+            super(context);
+            setClickable(true);
+        }
+
+        void play(final Runnable onComplete) {
+            if (anim != null) anim.cancel();
+            progress = 0f;
+            anim = ValueAnimator.ofFloat(0f, 1f);
+            anim.setDuration(185);
+            anim.setInterpolator(new DecelerateInterpolator(1.6f));
+            anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override
+                public void onAnimationUpdate(ValueAnimator a) {
+                    progress = (Float) a.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            anim.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (onComplete != null) onComplete.run();
+                }
+            });
+            anim.start();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float d = P5Theme.dp(getContext(), 1f);
+            float tilt = w * 0.28f;
+            float redW = 28f * d;
+            float whiteW = 5f * d;
+            // Lead edge sweeps from left-of-screen all the way past right+tilt
+            float leadTopX = -redW + (w + tilt + redW * 2f) * progress;
+            float leadBotX = leadTopX - tilt;
+
+            paint.setStyle(Paint.Style.FILL);
+
+            // Solid INK_BLACK curtain behind the slash
+            fillPath.reset();
+            fillPath.moveTo(-tilt, 0);
+            fillPath.lineTo(leadTopX, 0);
+            fillPath.lineTo(leadBotX, h);
+            fillPath.lineTo(-tilt, h);
+            fillPath.close();
+            paint.setColor(P5Theme.INK_BLACK);
+            c.drawPath(fillPath, paint);
+
+            // Leading crimson blade
+            redPath.reset();
+            redPath.moveTo(leadTopX, 0);
+            redPath.lineTo(leadTopX + redW, 0);
+            redPath.lineTo(leadBotX + redW, h);
+            redPath.lineTo(leadBotX, h);
+            redPath.close();
+            paint.setColor(P5Theme.P5_RED);
+            c.drawPath(redPath, paint);
+
+            // Razor-sharp paper-white edge
+            whitePath.reset();
+            whitePath.moveTo(leadTopX + redW, 0);
+            whitePath.lineTo(leadTopX + redW + whiteW, 0);
+            whitePath.lineTo(leadBotX + redW + whiteW, h);
+            whitePath.lineTo(leadBotX + redW, h);
+            whitePath.close();
+            paint.setColor(P5Theme.PAPER_WHITE);
+            c.drawPath(whitePath, paint);
         }
     }
 }

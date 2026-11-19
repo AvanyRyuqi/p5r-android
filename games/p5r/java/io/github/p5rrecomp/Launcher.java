@@ -95,6 +95,7 @@ public class Launcher extends Activity {
     final List<Option> options = new ArrayList<>();
     final Map<String, String> config = new LinkedHashMap<>();
 
+    private FrameLayout rootFrame;
     private P5BackgroundView bgView;
     private LinearLayout foregroundRoot;
     private final P5Views.NavTabView[] navTabs = new P5Views.NavTabView[TAB_COUNT];
@@ -124,10 +125,14 @@ public class Launcher extends Activity {
     private TextView wpSub;
     private View wpDimRow;
     private P5Views.SegmentedControl wpDimSeg;
+    private View wpHalftoneRow;
+    private P5Views.SegmentedControl wpHalftoneSeg;
 
     private Bitmap currentWallpaperBmp;
     private boolean hasPausedOnce = false;
+    private boolean launchingGame = false;
     private P5Views.IntroOverlayView introOverlay;
+    private P5Views.LaunchSlashOverlayView launchOverlay;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
@@ -339,8 +344,23 @@ public class Launcher extends Activity {
         if (bgView != null) bgView.setWallpaperDim(clamped);
     }
 
+    int halftoneMode() {
+        return Math.max(P5BackgroundView.HALFTONE_RIBBONS,
+                Math.min(P5BackgroundView.HALFTONE_OFF, prefs().getInt("wp_halftone", P5BackgroundView.HALFTONE_RIBBONS)));
+    }
+
+    void setHalftoneMode(int mode) {
+        int clamped = Math.max(P5BackgroundView.HALFTONE_RIBBONS,
+                Math.min(P5BackgroundView.HALFTONE_OFF, mode));
+        prefs().edit().putInt("wp_halftone", clamped).apply();
+        if (bgView != null) bgView.setHalftoneMode(clamped);
+    }
+
     void loadWallpaper() {
-        if (bgView != null) bgView.setWallpaperDim(wallpaperDim());
+        if (bgView != null) {
+            bgView.setWallpaperDim(wallpaperDim());
+            bgView.setHalftoneMode(halftoneMode());
+        }
         File f = wallpaperFile();
         if (!f.canRead()) {
             if (currentWallpaperBmp != null) {
@@ -414,6 +434,15 @@ public class Launcher extends Activity {
         if (wpDimSeg != null) {
             wpDimSeg.setEnabled(custom);
             wpDimSeg.setSelectedIndex(wallpaperDim());
+        }
+        if (wpHalftoneRow != null) {
+            float alpha = custom ? 0.36f : 1.0f;
+            wpHalftoneRow.setTag(alpha);
+            wpHalftoneRow.setAlpha(alpha);
+        }
+        if (wpHalftoneSeg != null) {
+            wpHalftoneSeg.setEnabled(!custom);
+            wpHalftoneSeg.setSelectedIndex(halftoneMode());
         }
     }
 
@@ -513,6 +542,11 @@ public class Launcher extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        launchingGame = false;
+        if (launchOverlay != null && rootFrame != null) {
+            rootFrame.removeView(launchOverlay);
+            launchOverlay = null;
+        }
         hideSystemBars();
         refresh();
         if (bgView != null) {
@@ -717,6 +751,7 @@ public class Launcher extends Activity {
 
     private void buildUi(boolean playIntro) {
         FrameLayout root = new FrameLayout(this);
+        rootFrame = root;
         root.setBackgroundColor(P5Theme.INK_BLACK);
 
         // Full-bleed background canvas
@@ -916,6 +951,7 @@ public class Launcher extends Activity {
         bottomRow.addView(heroStatusCard, stLp);
 
         heroPlay = new P5Views.SlashButton(this, t("JUGAR", "PLAY"), true, 62);
+        heroPlay.enableHeroSheen(true);
         heroPlay.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) { onPlayClicked(); }
@@ -1145,6 +1181,40 @@ public class Launcher extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         dimLp.bottomMargin = dp(6);
         list.addView(dimRow, dimLp);
+
+        // Default Wallpaper Halftone Style (active when Default Wallpaper is shown)
+        P5Views.AngledRowLayout htRow = new P5Views.AngledRowLayout(this);
+        LinearLayout htTextCol = new LinearLayout(this);
+        htTextCol.setOrientation(LinearLayout.VERTICAL);
+        htTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView htTitle = new TextView(this);
+        htTitle.setText(t("Estilo de semitonos", "Halftone Style"));
+        htTitle.setTypeface(P5Theme.condensedBold());
+        htTitle.setTextSize(15.5f);
+        htTitle.setTextColor(P5Theme.PAPER_WHITE);
+        htTextCol.addView(htTitle);
+        TextView htDesc = new TextView(this);
+        htDesc.setText(t("Puntos Ben-Day del fondo por defecto",
+                "Ben-Day dot treatment on the Default Wallpaper"));
+        htDesc.setTypeface(P5Theme.bodyRegular());
+        htDesc.setTextSize(11.5f);
+        htDesc.setTextColor(P5Theme.MUTED_TEXT);
+        htTextCol.addView(htDesc);
+        htRow.addView(htTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] htLabels = new String[] {
+            t("CINTAS", "RIBBONS"), t("ESTRELLA", "STAR HALO"), t("NO", "OFF")
+        };
+        wpHalftoneSeg = new P5Views.SegmentedControl(this, htLabels, halftoneMode(), false,
+                new P5Views.SegmentedControl.OnPickListener() {
+                    @Override
+                    public void onPick(int index) { setHalftoneMode(index); }
+                });
+        htRow.addView(wpHalftoneSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        wpHalftoneRow = htRow;
+        LinearLayout.LayoutParams htLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        htLp.bottomMargin = dp(6);
+        list.addView(htRow, htLp);
 
         addActionRow(list,
                 t("Acceso directo con icono propio", "Custom Home Shortcut Icon"),
@@ -1388,7 +1458,29 @@ public class Launcher extends Activity {
 
     // ---- Launch action ----
 
+    private void launchGameWithSlash() {
+        if (launchingGame) return;
+        launchingGame = true;
+        save();
+        if (rootFrame == null) {
+            startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+            return;
+        }
+        if (launchOverlay != null) rootFrame.removeView(launchOverlay);
+        launchOverlay = new P5Views.LaunchSlashOverlayView(this);
+        rootFrame.addView(launchOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        launchOverlay.play(new Runnable() {
+            @Override
+            public void run() {
+                startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+                overridePendingTransition(0, 0);
+            }
+        });
+    }
+
     private void onPlayClicked() {
+        if (launchingGame) return;
         if (!hasAccess()) {
             askAccess();
             return;
@@ -1398,8 +1490,7 @@ public class Launcher extends Activity {
             else if (!hasKeys()) pick(PICK_KEYS, "*/*", true);
             else if (!prepared()) prepare();
             else if (openGameForRuntime()) {
-                save();
-                startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+                launchGameWithSlash();
             } else {
                 tell(t("No se pudo abrir el juego", "The game could not be opened"), gameName());
             }
@@ -1413,8 +1504,7 @@ public class Launcher extends Activity {
             refresh();
             return;
         }
-        save();
-        startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+        launchGameWithSlash();
     }
 
     // ---- State sync ----
