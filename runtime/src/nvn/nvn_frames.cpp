@@ -1063,25 +1063,42 @@ bool claim_free_image(const std::shared_ptr<GpuImage>& img) {
 }
 
 std::shared_ptr<GpuImage> take_free_image(const GpuImage& proto) {
-    std::shared_ptr<GpuImage> img;
+    std::shared_ptr<GpuImage> old;
     {
         std::lock_guard lk(g_grave_lock);
         auto it = g_free_images.find(free_image_key(proto));
         if (it == g_free_images.end() || it->second.empty()) return nullptr;
-        img = std::move(it->second.back());
+        old = std::move(it->second.back());
         it->second.pop_back();
         if (it->second.empty()) g_free_images.erase(it);
         if (g_free_image_count > 0) g_free_image_count--;
-        img->in_free_pool = false;
+        old->in_free_pool = false;
         g_reused++;
     }
-    forget_image_views(*img, true);
-    img->audit_hash = img->audit_frame = 0;
-    img->upload_sample_hash = img->upload_storage_size = img->last_memory = 0;
-    img->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    img->rendered = img->uploaded = img->texels = img->retired = false;
-    img->rendered_at = 0;
-    return img;
+    forget_image_views(*old, true);
+    // Construct a fresh GpuImage control block and transfer only the immutable Vulkan handles so any stale
+    // std::weak_ptr<GpuImage> still in g_live_images for the previous owner's guest pool address expires immediately
+    // and can never alias this VkImage to an unrelated texture/glyph at a different pool address.
+    auto fresh = std::make_shared<GpuImage>();
+    fresh->image = old->image;
+    fresh->memory = old->memory;
+    fresh->view = old->view;
+    fresh->format = old->format;
+    fresh->aspect = old->aspect;
+    fresh->width = old->width;
+    fresh->height = old->height;
+    fresh->levels = old->levels;
+    fresh->layers = old->layers;
+    fresh->depth = old->depth;
+    fresh->view_type = old->view_type;
+    fresh->storage = old->storage;
+    fresh->mutable_format = old->mutable_format;
+    fresh->cube_compat = old->cube_compat;
+    fresh->alpha_from_r = old->alpha_from_r;
+    old->image = VK_NULL_HANDLE;
+    old->memory = VK_NULL_HANDLE;
+    old->view = VK_NULL_HANDLE;
+    return fresh;
 }
 
 // Images of destroyed textures are freed once no submit can use them: the one being recorded now included (a replay
