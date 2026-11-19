@@ -792,40 +792,40 @@ public class Launcher extends Activity {
         panel.addView(spacer, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // Crisp cut-paper status strip (warning highlight when setup needed, sleek stamp when ready)
+        // Bottom Launch Bar: READY TO PLAY status box directly beside Hero PLAY Slash Button
+        LinearLayout bottomRow = new LinearLayout(this);
+        bottomRow.setOrientation(LinearLayout.HORIZONTAL);
+        bottomRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        bottomRow.setClipChildren(false);
+
         heroStatusCard = new P5Views.AngledRowLayout(this);
         heroStatusCard.setOrientation(LinearLayout.VERTICAL);
+        heroStatusCard.setGravity(Gravity.CENTER_VERTICAL);
         heroStatusTitle = new TextView(this);
         heroStatusTitle.setTypeface(P5Theme.displayBold());
-        heroStatusTitle.setTextSize(13.5f);
+        heroStatusTitle.setTextSize(13f);
+        heroStatusTitle.setSingleLine(true);
         heroStatusTitle.setTextColor(P5Theme.ACID_YELLOW);
         heroStatusCard.addView(heroStatusTitle);
 
         heroStatusBody = new TextView(this);
         heroStatusBody.setTypeface(P5Theme.bodyRegular());
-        heroStatusBody.setTextSize(12.5f);
+        heroStatusBody.setTextSize(11.5f);
         heroStatusBody.setTextColor(P5Theme.PAPER_WHITE);
-        heroStatusBody.setMaxLines(2);
+        heroStatusBody.setSingleLine(true);
+        heroStatusBody.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         heroStatusCard.addView(heroStatusBody);
 
-        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
-                dp(430), LinearLayout.LayoutParams.WRAP_CONTENT);
-        stLp.gravity = Gravity.END;
-        stLp.bottomMargin = dp(12);
-        panel.addView(heroStatusCard, stLp);
-
-        // Bottom-right Action Row: Hero PLAY Slash Button (Wallpaper controls live cleanly in FILES)
-        LinearLayout bottomRow = new LinearLayout(this);
-        bottomRow.setOrientation(LinearLayout.HORIZONTAL);
-        bottomRow.setGravity(Gravity.END | Gravity.BOTTOM);
-        bottomRow.setClipChildren(false);
+        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(0, dp(58), 1f);
+        stLp.rightMargin = dp(12);
+        bottomRow.addView(heroStatusCard, stLp);
 
         heroPlay = new P5Views.SlashButton(this, t("JUGAR", "PLAY"), true, 62);
         heroPlay.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) { onPlayClicked(); }
         });
-        LinearLayout.LayoutParams hpLp = new LinearLayout.LayoutParams(dp(248), dp(62));
+        LinearLayout.LayoutParams hpLp = new LinearLayout.LayoutParams(dp(236), dp(62));
         bottomRow.addView(heroPlay, hpLp);
 
         panel.addView(bottomRow, new LinearLayout.LayoutParams(
@@ -1146,6 +1146,7 @@ public class Launcher extends Activity {
     // ---- Tab switching & Hybrid Pinned Play logic ----
 
     private void selectTab(int idx, boolean animate) {
+        if (animate && idx == activeTab) return;
         activeTab = idx;
         for (int i = 0; i < TAB_COUNT; i++) {
             navTabs[i].setActive(i == idx, animate);
