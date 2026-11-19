@@ -961,11 +961,48 @@ void hide_system_bars(JNIEnv* env, jobject activity) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
+std::mutex g_toast_m;
+std::string g_toast_msg;
+
+void show_toast_ui(JNIEnv* env, jobject activity, const std::string& msg) {
+    if (!env || !activity || msg.empty()) return;
+    jclass toast_cls = env->FindClass("android/widget/Toast");
+    jmethodID make_text = toast_cls
+                              ? env->GetStaticMethodID(toast_cls, "makeText",
+                                                       "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;")
+                              : nullptr;
+    jmethodID show_mid = toast_cls ? env->GetMethodID(toast_cls, "show", "()V") : nullptr;
+    jstring jmsg = (make_text && show_mid && !env->ExceptionCheck()) ? env->NewStringUTF(msg.c_str()) : nullptr;
+    jobject toast = (jmsg && !env->ExceptionCheck())
+                        ? env->CallStaticObjectMethod(toast_cls, make_text, activity, jmsg, jint(0))
+                        : nullptr;
+    if (toast && !env->ExceptionCheck()) env->CallVoidMethod(toast, show_mid);
+    if (toast) env->DeleteLocalRef(toast);
+    if (jmsg) env->DeleteLocalRef(jmsg);
+    if (toast_cls) env->DeleteLocalRef(toast_cls);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
 int on_ui_request(int fd, int, void*) {
+    bool do_immersive = false;
+    bool do_toast = false;
     char buf[16];
-    while (read(fd, buf, sizeof buf) > 0) {
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == 1) do_immersive = true;
+            else if (buf[i] == 2) do_toast = true;
+        }
     }
-    if (g_activity) hide_system_bars(g_activity->env, g_activity->clazz);
+    if (g_activity && do_immersive) hide_system_bars(g_activity->env, g_activity->clazz);
+    if (g_activity && do_toast) {
+        std::string msg;
+        {
+            std::lock_guard lk(g_toast_m);
+            msg = g_toast_msg;
+        }
+        show_toast_ui(g_activity->env, g_activity->clazz, msg);
+    }
     return 1;
 }
 
@@ -975,6 +1012,18 @@ void request_immersive() {
 }
 
 }  // namespace
+
+namespace nx::plat {
+void show_toast(const char* msg) {
+    if (!msg || !msg[0] || g_ui_pipe[1] < 0) return;
+    {
+        std::lock_guard lk(g_toast_m);
+        g_toast_msg = msg;
+    }
+    char c = 2;
+    (void)write(g_ui_pipe[1], &c, 1);
+}
+}  // namespace nx::plat
 
 // Frames presented so far, for the launcher's FPS counter (GameActivity.nativeFrames, in the game's own process).
 extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameActivity_nativeFrames(JNIEnv*, jclass) {
