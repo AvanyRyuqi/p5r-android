@@ -362,7 +362,7 @@ public class Launcher extends Activity {
         }
     }
 
-    void clearWallpaper() {
+    void resetLauncherWallpaper() {
         wallpaperFile().delete();
         loadWallpaper();
         updateWallpaperUi();
@@ -836,7 +836,7 @@ public class Launcher extends Activity {
         heroResetWp = new P5Views.SlashButton(this, t("RESET", "RESET"), false, 44);
         heroResetWp.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View v) { clearWallpaper(); }
+            public void onClick(View v) { resetLauncherWallpaper(); }
         });
         LinearLayout.LayoutParams rwLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
@@ -1027,7 +1027,7 @@ public class Launcher extends Activity {
                 t("RESTAURAR", "RESET"),
                 new View.OnClickListener() {
                     @Override
-                    public void onClick(View v) { clearWallpaper(); }
+                    public void onClick(View v) { resetLauncherWallpaper(); }
                 }, false);
 
         addActionRow(list,
