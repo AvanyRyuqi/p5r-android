@@ -372,6 +372,9 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
     // allowing larger (> 4 KB) static blocks to cache unless their 64 KB guest page exhibits ring-buffer churn.
     static const bool cache_blocks = std::getenv("NX_CACHE_BLOCKS") != nullptr;
     if (g_upload_kind == kUploadBlock && size <= 4096 && !cache_blocks) return false;
+    // Tiny dynamic 2D/UI vertex and index buffers (e.g. Phone IM / HUD quads) are streamed from per-frame guest rings;
+    // bypass BufferCache so they don't churn g_seen_slots or trigger mid-frame g_evict_epoch wipes of 3D mesh caches.
+    if (!g_is_3d_scene_draw && (g_upload_kind == kUploadVertex || g_upload_kind == kUploadIndex) && size <= 512) return false;
 
     const uint32_t u_idx = unstable_slot_index(p);
     if (g_unstable_front[u_idx].p == p) {

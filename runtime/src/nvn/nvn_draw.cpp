@@ -85,6 +85,8 @@ uint32_t g_pass_written = 0;  // targets the open pass's draws wrote: bit c colo
 uint64_t g_pass_draws = 0;    // draws in the open pass (NX_EXP_RP split)
 static thread_local bool s_pass_linear_noted = false;
 uint64_t g_pass_ends[8];  // passes ended, by draw_end_rendering reason
+uint64_t g_dont_care_loads = 0;    // color attachments upgraded from LOAD to DONT_CARE on fullscreen opaque passes
+uint64_t g_bloom_blur_skipped = 0; // P5R L0 bloom blur passes skipped under NX_DISABLE_BLOOM=1
 uint64_t g_submit_ns = 0;  // when the submit being replayed started
 VkExtent2D g_pass_extent{};
 
@@ -284,7 +286,7 @@ void pass_census(const Targets& t, const VkRenderingAttachmentInfo* colors, cons
     e.passes++, e.load += load, e.store += store;
 }
 
-void begin_rendering(VkCommandBuffer cb, const Targets& t) {
+void begin_rendering(VkCommandBuffer cb, const Targets& t, uint32_t dont_care_color_mask = 0) {
     if (clears_pending_other(t)) {  // other targets' clears first, in order (NX_CLEARS_V2: only those on its images)
         if (live_clears_why()) clears_log_mismatch("pass", t);
         clears_flush_reason(10), clears_flush_other(cb, t);
@@ -305,6 +307,7 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
         if (img->layout == VK_IMAGE_LAYOUT_UNDEFINED && !load_undefined) fresh |= 1u << k;
         transition(cb, *img, VK_IMAGE_LAYOUT_GENERAL);  // rendered images stay GENERAL (sampled while rendered)
         img->rendered = true;
+        img->bloom_cleared = false;
         uint32_t level = std::min<uint32_t>(t.views.level[k], img->levels - 1);
         formats[k] = view_format(*img, t.views.format[k]);
         colors[k].imageView = attachment_view(*img, level, t.views.layer[k], formats[k]);
@@ -354,6 +357,15 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
     VkRenderingAttachmentInfo stencil = depth;  // same view, its own loadOp
     stencil.storeOp = g_shadow_target ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
     uint32_t cleared = clears_apply(t, colors, depth, stencil);  // pending clears of these targets: loadOp CLEAR
+    if (dont_care_color_mask) {
+        for (uint32_t k = 0; k < t.color_count && k < 8; k++) {
+            if ((dont_care_color_mask >> k & 1) && colors[k].imageView &&
+                colors[k].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                colors[k].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                g_dont_care_loads++;
+            }
+        }
+    }
     if (exp_render_pass() & 1) {  // NX_EXP_RP=noload: what loading the targets costs (the picture breaks)
         for (uint32_t k = 0; k < t.color_count; k++)
             if (colors[k].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) colors[k].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -572,12 +584,16 @@ bool shadow_draw_skipped(const Targets& t) {
 }
 
 // NX_DISABLE_BLOOM=1 (the launcher's "Post-procesado: desactivado"): no draws into bloom/blur mip chains.
-bool bloom_draw_skipped(const Targets& t) {
+bool bloom_disabled_env() {
     static const bool s_bloom_disabled = [] {
         const char* e = std::getenv("NX_DISABLE_BLOOM");
         return e && (e[0] == '1' || std::strcmp(e, "true") == 0);
     }();
-    if (!s_bloom_disabled) return false;
+    return s_bloom_disabled;
+}
+
+bool bloom_draw_skipped(const Targets& t) {
+    if (!bloom_disabled_env()) return false;
     if (t.color_count > 0 && t.views.level[0] > 0) return true;
     return false;
 }
@@ -1093,6 +1109,166 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, c
     }
 }
 
+// Determines which color attachments (bitmask 0..7) are guaranteed to be 100% overwritten by the first draw of a new
+// render pass so Mali TBDR can use VK_ATTACHMENT_LOAD_OP_DONT_CARE instead of loading stale pixels from LPDDR.
+uint32_t compute_dont_care_color_mask(const Targets& tt, const ShaderInfo* vs, const ShaderInfo* fs,
+                                      uint32_t mode, bool indexed, const Cmd& c) {
+    static const bool s_no_dont_care = std::getenv("NX_NO_DONT_CARE_LOAD") != nullptr;
+    if (s_no_dont_care || !vs || !fs || fs->refl.uses_discard || !tt.color_count || tt.color_count > 8) return 0;
+    if (g_state.depth.depth_test || g_state.depth.stencil_test || g_state.alpha_to_coverage || g_state.cond_on || s_exp3d)
+        return 0;
+    if (g_state.color.alpha_test != 0 && g_state.color.alpha_test != 8) return 0;  // NVN_ALPHA_FUNC_ALWAYS = 8
+    if (vk_features().fillModeNonSolid && g_state.polygon.mode < 2) return 0;      // must be FILL
+    if (g_state.polygon.cull == 3) return 0;                                       // FRONT_AND_BACK culls everything
+    if (mode != 4 && mode != 5 && mode != 6 && mode != 7) return 0;                // TRIANGLES/STRIP/FAN/QUADS
+    const uint32_t vcount = uint32_t(indexed ? c.i[0] : c.i[1]);
+    if (vcount != 3 && vcount != 4 && vcount != 6) return 0;
+
+    VkExtent2D extent{UINT32_MAX, UINT32_MAX};
+    GpuImage* imgs[8] = {};
+    VkFormat fmts[8] = {};
+    for (uint32_t k = 0; k < tt.color_count; k++) {
+        GpuImage* img = tt.colors[k] ? image_of(tt.colors[k]) : nullptr;
+        imgs[k] = img;
+        if (!img) continue;
+        const uint32_t level = std::min<uint32_t>(tt.views.level[k], img->levels - 1);
+        fmts[k] = view_format(*img, tt.views.format[k]);
+        extent = {std::min(extent.width, std::max(1u, img->width >> level)),
+                  std::min(extent.height, std::max(1u, img->height >> level))};
+    }
+    if (GpuImage* dimg = tt.depth ? image_of(tt.depth) : nullptr; dimg && dimg->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
+        const uint32_t level = std::min<uint32_t>(tt.views.level[8], dimg->levels - 1);
+        extent = {std::min(extent.width, std::max(1u, dimg->width >> level)),
+                  std::min(extent.height, std::max(1u, dimg->height >> level))};
+    }
+    if (extent.width == UINT32_MAX || extent.width == 0 || extent.height == 0) return 0;
+
+    const bool window_only = (tt.color_count == 1 && !tt.depth && imgs[0] && imgs[0]->is_window_target);
+    bool fullscreen_geom = fs->is_known_fullscreen_fs || vs->refl.inputs.empty() || (fs->is_copy_fs && window_only);
+    if (!fullscreen_geom && fs->is_copy_fs && vs->is_passthrough_vs &&
+        !g_state.attribs.empty() && !g_state.streams.empty()) {
+        const VertexAttrib& va = g_state.attribs[0];
+        const VkFormat vf = vk_vertex_format(va.format);
+        const bool is_f32_xy = (vf == VK_FORMAT_R32G32_SFLOAT || vf == VK_FORMAT_R32G32B32_SFLOAT ||
+                                vf == VK_FORMAT_R32G32B32A32_SFLOAT);
+        if (is_f32_xy && va.stream < g_state.streams.size() && va.stream < 16) {
+            const Range& vb = g_state.vertex_buffers[va.stream];
+            const uint32_t stride = g_state.streams[va.stream].stride;
+            const uint8_t* base = vb.address ? guest_bytes(vb.address) : nullptr;
+            const uint8_t* ib = indexed ? guest_bytes(c.a[0]) : nullptr;
+            const uint32_t isz = indexed ? index_size(c.mask) : 0;
+            if (base && (!indexed || ib)) {
+                float min_x = 1e30f, max_x = -1e30f, min_y = 1e30f, max_y = -1e30f;
+                bool ok = true;
+                for (uint32_t k = 0; k < vcount; k++) {
+                    uint32_t vi = 0;
+                    if (indexed) {
+                        std::memcpy(&vi, ib + uint64_t(k) * isz, isz);
+                        vi = uint32_t(int32_t(vi) + c.i[1]);
+                    } else {
+                        vi = uint32_t(c.i[0] + int32_t(k));
+                    }
+                    const uint64_t off = uint64_t(vi) * stride + va.offset;
+                    if (off + 8 > vb.size) {
+                        ok = false;
+                        break;
+                    }
+                    float xy[2];
+                    std::memcpy(xy, base + off, 8);
+                    min_x = std::min(min_x, xy[0]), max_x = std::max(max_x, xy[0]);
+                    min_y = std::min(min_y, xy[1]), max_y = std::max(max_y, xy[1]);
+                }
+                if (ok && min_x <= -0.999f && max_x >= 0.999f && min_y <= -0.999f && max_y >= 0.999f)
+                    fullscreen_geom = true;
+            }
+        }
+    }
+    if (!fullscreen_geom) return 0;
+
+    float vp_x = 0.0f, vp_y = 0.0f, vp_w = float(extent.width), vp_h = float(extent.height);
+    if (g_state.has_viewport) {
+        vp_x = float(g_state.viewport[0]), vp_y = float(g_state.viewport[1]);
+        vp_w = float(g_state.viewport[2]), vp_h = float(g_state.viewport[3]);
+        if (g_uw_wide) {
+            int32_t x = int32_t(vp_x), w = int32_t(vp_w);
+            uw_span(x, w, extent.width);
+            vp_x = float(x), vp_w = float(w);
+        }
+        if (g_hud_target) {
+            const float k = hud_scale();
+            vp_x *= k, vp_y *= k, vp_w *= k, vp_h *= k;
+        }
+        if (g_low_3d_target) {
+            const float k = low_3d_scale();
+            vp_x *= k, vp_y *= k, vp_w *= k, vp_h *= k;
+        }
+    }
+    int64_t sc_x = 0, sc_y = 0, sc_w = extent.width, sc_h = extent.height;
+    if (g_state.has_scissor) {
+        sc_x = std::max(0, g_state.scissor[0]);
+        sc_y = std::max(0, g_state.scissor[1]);
+        sc_w = std::max(0, g_state.scissor[2]);
+        sc_h = std::max(0, g_state.scissor[3]);
+        if (g_uw_wide) {
+            int32_t x = int32_t(sc_x), w = int32_t(sc_w);
+            uw_span(x, w, extent.width);
+            sc_x = x, sc_w = w;
+        }
+        if (g_hud_target) {
+            const int32_t x0 = hud_up(int32_t(sc_x)), y0 = hud_up(int32_t(sc_y));
+            const int64_t x1 = std::min<int64_t>(hud_up_end(int32_t(sc_x + sc_w)), extent.width);
+            const int64_t y1 = std::min<int64_t>(hud_up_end(int32_t(sc_y + sc_h)), extent.height);
+            sc_x = x0, sc_y = y0, sc_w = std::max<int64_t>(0, x1 - x0), sc_h = std::max<int64_t>(0, y1 - y0);
+        }
+        if (g_low_3d_target) {
+            const int32_t x0 = low_3d_down(int32_t(sc_x)), y0 = low_3d_down(int32_t(sc_y));
+            const int64_t x1 = std::min<int64_t>(low_3d_down_end(int32_t(sc_x + sc_w)), extent.width);
+            const int64_t y1 = std::min<int64_t>(low_3d_down_end(int32_t(sc_y + sc_h)), extent.height);
+            sc_x = x0, sc_y = y0, sc_w = std::max<int64_t>(1, x1 - x0), sc_h = std::max<int64_t>(1, y1 - y0);
+        }
+    }
+    int64_t cov_x = 0, cov_y = 0, cov_w = extent.width, cov_h = extent.height;
+    if (window_only && imgs[0]->present_crop_w > 0 && imgs[0]->present_crop_h > 0) {
+        cov_x = imgs[0]->present_crop_x;
+        cov_y = imgs[0]->present_crop_y;
+        cov_w = imgs[0]->present_crop_w;
+        cov_h = imgs[0]->present_crop_h;
+    }
+    const bool vp_covers = vp_x <= float(cov_x) + 0.01f && vp_y <= float(cov_y) + 0.01f &&
+                           vp_x + vp_w >= float(cov_x + cov_w) - 0.01f &&
+                           vp_y + vp_h >= float(cov_y + cov_h) - 0.01f;
+    const bool sc_covers = sc_x <= cov_x && sc_y <= cov_y &&
+                           sc_x + sc_w >= cov_x + cov_w && sc_y + sc_h >= cov_y + cov_h;
+    if (!vp_covers || !sc_covers) return 0;
+
+    auto format_channels_mask = [](VkFormat f) -> uint8_t {
+        switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
+        case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_SFLOAT:
+        case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+            return 0x1;
+        case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R16G16_SFLOAT:
+        case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R32G32_SFLOAT:
+            return 0x3;
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+            return 0x7;
+        default:
+            return 0xF;
+        }
+    };
+    uint32_t dc_mask = 0;
+    for (uint32_t k = 0; k < tt.color_count; k++) {
+        if (!imgs[k]) continue;
+        if (g_state.color.blend_enable[k]) continue;
+        if (!(fs->refl.output_mask >> k & 1)) continue;
+        const uint8_t req = format_channels_mask(fmts[k]);
+        if ((g_state.mask.mask[k] & req) != req) continue;
+        dc_mask |= 1u << k;
+    }
+    return dc_mask;
+}
+
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
     const uint64_t t_draw0 = draw_fast_ticks();
     g_stats.total++;
@@ -1210,6 +1386,27 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
     if (__builtin_expect(debug_shader_overrides_active(), 0)) {
         if (!debug_shader_overrides(shaders, fs, s_swapped_shaders)) return false;
+    }
+    // NX_DISABLE_BLOOM=1 on P5R: skip the 12x/frame L0 RGBA16F separable bloom Gaussian blur passes (bcb82de5fe6caa5d).
+    // Clear each skipped target to black once after any real pass writes it so downstream combine/tonemap sees clean 0.
+    if (bloom_disabled_env() && fs && fs->is_p5r_bloom_blur && t.color_count == 1 && !t.depth && t.colors[0]) {
+        if (GpuImage* bimg = image_of(t.colors[0]);
+            bimg && bimg->format == VK_FORMAT_R16G16B16A16_SFLOAT && bimg->width <= 480 && bimg->height <= 270) {
+            if (clears_pending_image(bimg)) {
+                pass_end_for_transfer(cb);
+                clears_flush_image(cb, t.colors[0]);
+                bimg->bloom_cleared = false;
+            }
+            if (!bimg->bloom_cleared || bimg->layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                pass_end_for_transfer(cb);
+                clear_image(cb, *bimg);
+                transition(cb, *bimg, VK_IMAGE_LAYOUT_GENERAL);
+                bimg->rendered = true;
+                bimg->bloom_cleared = true;
+            }
+            g_bloom_blur_skipped++;
+            return skip_draw();
+        }
     }
     const ProgramLayout& layout = (shaders == s_cached_shaders) ? *layout_ptr : program_layout(*shaders);
 
@@ -1406,7 +1603,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                           t.views.level[0], fs ? fs->hash.c_str() : "-");
             gpu_profile_mark(cb, label);
         }
-        begin_rendering(cb, tt);
+        const uint32_t dc_mask = compute_dont_care_color_mask(tt, vs, fs, mode, indexed, c);
+        begin_rendering(cb, tt, dc_mask);
         s_pass_targets_ver = used_detached ? 0 : cur_t_ver;
     }
 
@@ -1998,15 +2196,20 @@ void draw_log_stats() {
     log("nvn passes: %llu ended by a draw's texture uploads or layout changes, %llu by new targets, %llu dispatches",
         (unsigned long long)t.breaks_textures, (unsigned long long)t.breaks_targets, (unsigned long long)t.dispatches);
     static uint64_t s_prev_total = 0, s_prev_done = 0, s_prev_breaks_tex = 0, s_prev_linear = 0;
+    static uint64_t s_prev_dc = 0, s_prev_bloom = 0;
     const uint64_t d_total = t.total - s_prev_total;
     const uint64_t d_done = t.done - s_prev_done;
     const uint64_t d_btex = t.breaks_textures - s_prev_breaks_tex;
     const uint64_t d_lin = g_linear_copies - s_prev_linear;
+    const uint64_t d_dc = g_dont_care_loads - s_prev_dc;
+    const uint64_t d_bloom = g_bloom_blur_skipped - s_prev_bloom;
     s_prev_total = t.total, s_prev_done = t.done, s_prev_breaks_tex = t.breaks_textures, s_prev_linear = g_linear_copies;
-    log("nvn window: +%llu draws (%llu done, %llu occluded), +%llu tex-breaks, +%llu linear write-backs",
+    s_prev_dc = g_dont_care_loads, s_prev_bloom = g_bloom_blur_skipped;
+    log("nvn window: +%llu draws (%llu done, %llu occluded), +%llu tex-breaks, +%llu linear write-backs, +%llu dont_care, +%llu bloom_skip",
         (unsigned long long)d_total, (unsigned long long)d_done,
         (unsigned long long)(d_total >= d_done ? d_total - d_done : 0),
-        (unsigned long long)d_btex, (unsigned long long)d_lin);
+        (unsigned long long)d_btex, (unsigned long long)d_lin,
+        (unsigned long long)d_dc, (unsigned long long)d_bloom);
     {
         static uint64_t s_prev_prof_frame = 0;
         const uint64_t cur_prof_frame = g_frame.load(std::memory_order_relaxed);
