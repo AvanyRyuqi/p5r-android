@@ -1129,8 +1129,10 @@ final class P5Views {
     // ---- 7b. Adaptive P5 Controller Hint Bar (Auto-shown on gamepad input, hidden on touch) ----
 
     static final class ControllerHintBar extends View {
-        private String[] keys = new String[0];
-        private String[] labels = new String[0];
+        private String[] leftKeys = new String[0];
+        private String[] leftLabels = new String[0];
+        private String[] rightKeys = new String[0];
+        private String[] rightLabels = new String[0];
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint keyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint lblPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1147,17 +1149,54 @@ final class P5Views {
             setFocusable(false);
         }
 
-        void setHints(String[] k, String[] l) {
-            this.keys = k;
-            this.labels = l;
+        void setSplitHints(String[] lk, String[] ll, String[] rk, String[] rl) {
+            this.leftKeys = lk != null ? lk : new String[0];
+            this.leftLabels = ll != null ? ll : new String[0];
+            this.rightKeys = rk != null ? rk : new String[0];
+            this.rightLabels = rl != null ? rl : new String[0];
             invalidate();
+        }
+
+        private float measureGroup(String[] ks, String[] ls, float d, float capPad) {
+            float total = 0f;
+            int n = Math.min(ks.length, ls.length);
+            for (int i = 0; i < n; i++) {
+                float kw = Math.max(18 * d, keyPaint.measureText(ks[i]) + capPad * 2f);
+                float lw = lblPaint.measureText(ls[i]);
+                total += kw + 5 * d + lw + (i + 1 < n ? 14 * d : 0f);
+            }
+            return total;
+        }
+
+        private void drawGroup(Canvas c, String[] ks, String[] ls, float startX, float maxX,
+                               float d, float h, float capPad, float capV, float kBase, float lBase) {
+            float x = startX;
+            int n = Math.min(ks.length, ls.length);
+            for (int i = 0; i < n; i++) {
+                float kw = Math.max(18 * d, keyPaint.measureText(ks[i]) + capPad * 2f);
+                float lw = lblPaint.measureText(ls[i]);
+                if (x + kw + 5 * d + lw > maxX) break;
+
+                P5Theme.setSlantedQuad(capPoly, x, capV, x + kw, h - capV, 3.5f * d, 3.5f * d);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(P5Theme.ACID_YELLOW);
+                c.drawPath(capPoly, paint);
+
+                keyPaint.setColor(P5Theme.INK_BLACK);
+                c.drawText(ks[i], x + kw * 0.5f, kBase, keyPaint);
+
+                lblPaint.setColor(P5Theme.PAPER_WHITE);
+                c.drawText(ls[i], x + kw + 5 * d, lBase, lblPaint);
+
+                x += kw + 5 * d + lw + 14 * d;
+            }
         }
 
         @Override
         protected void onDraw(Canvas c) {
             float d = P5Theme.dp(getContext(), 1f);
             float w = getWidth(), h = getHeight();
-            if (w <= 0 || h <= 0 || keys.length == 0) return;
+            if (w <= 0 || h <= 0 || (leftKeys.length == 0 && rightKeys.length == 0)) return;
 
             // Slanted ink strip
             P5Theme.setSlantedQuad(bgPoly, 0, 1 * d, w - 2 * d, h - 1 * d, 8 * d, 8 * d);
@@ -1176,27 +1215,16 @@ final class P5Views {
             float kBase = h * 0.5f - (kfm.ascent + kfm.descent) * 0.5f;
             float lBase = h * 0.5f - (lfm.ascent + lfm.descent) * 0.5f;
 
-            float x = 14 * d;
             float capPad = 5.5f * d;
             float capV = 4.5f * d;
-            for (int i = 0; i < keys.length && i < labels.length; i++) {
-                float kw = Math.max(18 * d, keyPaint.measureText(keys[i]) + capPad * 2f);
-                float lw = lblPaint.measureText(labels[i]);
-                if (x + kw + lw + 16 * d > w) break;
 
-                P5Theme.setSlantedQuad(capPoly, x, capV, x + kw, h - capV, 3.5f * d, 3.5f * d);
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(P5Theme.ACID_YELLOW);
-                c.drawPath(capPoly, paint);
+            // Right-aligned fixed global hints (never shift when moving Up/Down)
+            float rightW = measureGroup(rightKeys, rightLabels, d, capPad);
+            float rightStart = Math.max(14 * d, w - 16 * d - rightW);
+            drawGroup(c, rightKeys, rightLabels, rightStart, w - 8 * d, d, h, capPad, capV, kBase, lBase);
 
-                keyPaint.setColor(P5Theme.INK_BLACK);
-                c.drawText(keys[i], x + kw * 0.5f, kBase, keyPaint);
-
-                lblPaint.setColor(P5Theme.PAPER_WHITE);
-                c.drawText(labels[i], x + kw + 5 * d, lBase, lblPaint);
-
-                x += kw + lw + 15 * d;
-            }
+            // Left-aligned contextual row action (confined safely left of rightStart)
+            drawGroup(c, leftKeys, leftLabels, 14 * d, rightStart - 10 * d, d, h, capPad, capV, kBase, lBase);
         }
     }
 

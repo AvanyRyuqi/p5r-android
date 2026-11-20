@@ -1936,9 +1936,11 @@ public class Launcher extends Activity {
         String okLbl = "A";
         String backLbl = "B";
         if (activeTab == TAB_PLAY) {
-            controllerHintBar.setHints(
-                    new String[] {okLbl + " / START", "LB / RB", "▲▼"},
-                    new String[] {t("JUGAR", "PLAY"), t("PESTAÑAS", "TABS"), t("MENÚ", "MENU")});
+            controllerHintBar.setSplitHints(
+                    new String[] {okLbl + " / START"},
+                    new String[] {t("JUGAR", "PLAY")},
+                    new String[] {"LB / RB", "▲▼"},
+                    new String[] {t("PESTAÑAS", "TABS"), t("MENÚ", "MENU")});
             return;
         }
         List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
@@ -1946,37 +1948,27 @@ public class Launcher extends Activity {
                 ? rows.get(focusedRowIdx) : null;
         boolean hasSeg = row != null && findSegmentedInRow(row) != null;
         List<P5Views.SlashButton> btns = row != null ? findButtonsInRow(row) : java.util.Collections.<P5Views.SlashButton>emptyList();
-        boolean hasSubTabs = subTabCount[activeTab] > 1;
 
+        // Fixed right-aligned global controls (never shift horizontally when moving Up/Down)
+        String[] rk = new String[] {"LB / RB", backLbl, "START"};
+        String[] rl = new String[] {t("PESTAÑAS", "TABS"), t("INICIO", "HOME"), t("JUGAR", "PLAY")};
+
+        // Contextual left-aligned row action only
         if (hasSeg) {
-            if (hasSubTabs) {
-                controllerHintBar.setHints(
-                        new String[] {"◀▶", okLbl, "LT / RT", backLbl, "START"},
-                        new String[] {t("CAMBIAR", "CHANGE"), t("CICLAR", "CYCLE"),
-                                t("SUBPESTAÑA", "SUB-TAB"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
-            } else {
-                controllerHintBar.setHints(
-                        new String[] {"◀▶", okLbl, "LB / RB", backLbl, "START"},
-                        new String[] {t("CAMBIAR", "CHANGE"), t("CICLAR", "CYCLE"),
-                                t("PESTAÑAS", "TABS"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
-            }
+            controllerHintBar.setSplitHints(
+                    new String[] {"◀▶"},
+                    new String[] {t("AJUSTAR", "ADJUST")},
+                    rk, rl);
         } else if (btns.size() > 1) {
-            controllerHintBar.setHints(
-                    new String[] {"◀▶", okLbl, "LT / RT", backLbl, "START"},
-                    new String[] {t("BOTÓN", "SWITCH BTN"), t("ACTIVAR", "ACTIVATE"),
-                            t("SUBPESTAÑA", "SUB-TAB"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+            controllerHintBar.setSplitHints(
+                    new String[] {"◀▶", okLbl},
+                    new String[] {t("BOTÓN", "BTN"), t("OK", "SELECT")},
+                    rk, rl);
         } else {
-            if (hasSubTabs) {
-                controllerHintBar.setHints(
-                        new String[] {okLbl, "LT / RT", "LB / RB", backLbl, "START"},
-                        new String[] {t("ABRIR", "OPEN"), t("SUBPESTAÑA", "SUB-TAB"),
-                                t("PESTAÑAS", "TABS"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
-            } else {
-                controllerHintBar.setHints(
-                        new String[] {okLbl, "LB / RB", backLbl, "START"},
-                        new String[] {t("ABRIR", "OPEN"), t("PESTAÑAS", "TABS"),
-                                t("INICIO", "HOME"), t("JUGAR", "PLAY")});
-            }
+            controllerHintBar.setSplitHints(
+                    new String[] {okLbl},
+                    new String[] {t("ABRIR", "OPEN")},
+                    rk, rl);
         }
     }
 
