@@ -16,6 +16,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
@@ -23,7 +25,9 @@ import android.system.Os;
 import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -101,7 +105,31 @@ public class Launcher extends Activity {
     private final P5Views.NavTabView[] navTabs = new P5Views.NavTabView[TAB_COUNT];
     private final View[] tabPanels = new View[TAB_COUNT];
     private final LinearLayout[] tabLists = new LinearLayout[TAB_COUNT];
+    private final ScrollView[] tabScrolls = new ScrollView[TAB_COUNT];
     private int activeTab = TAB_PLAY;
+
+    // Physical controller navigation state
+    private P5Views.ControllerHintBar controllerHintBar;
+    private boolean controllerMode = false;
+    private int focusedRowIdx = 0;
+    private int focusedBtnIdx = 0;
+    private int stickDirY = 0;
+    private int stickDirX = 0;
+    private boolean ltDown = false;
+    private boolean rtDown = false;
+    private final Handler stickRepeatHandler = new Handler(Looper.getMainLooper());
+    private final Runnable stickRepeatTask = new Runnable() {
+        @Override
+        public void run() {
+            if (stickDirY != 0) {
+                onControllerVertical(stickDirY);
+                stickRepeatHandler.postDelayed(this, 125L);
+            } else if (stickDirX != 0) {
+                onControllerHorizontal(stickDirX);
+                stickRepeatHandler.postDelayed(this, 145L);
+            }
+        }
+    };
 
     // Hybrid PLAY buttons: heroPlay shown on TAB_PLAY, pinnedPlay shown on Settings tabs
     private P5Views.SlashButton heroPlay;
@@ -587,6 +615,9 @@ public class Launcher extends Activity {
         super.onPause();
         hasPausedOnce = true;
         if (bgView != null) bgView.setHostResumed(false);
+        stickDirX = 0;
+        stickDirY = 0;
+        stickRepeatHandler.removeCallbacks(stickRepeatTask);
     }
 
     @Override
@@ -876,13 +907,27 @@ public class Launcher extends Activity {
         foregroundRoot.addView(leftRail, new LinearLayout.LayoutParams(
                 dp(236), LinearLayout.LayoutParams.MATCH_PARENT));
 
-        // RIGHT DYNAMIC STAGE
+        // RIGHT DYNAMIC STAGE + ADAPTIVE CONTROLLER HINT BAR
+        LinearLayout rightCol = new LinearLayout(this);
+        rightCol.setOrientation(LinearLayout.VERTICAL);
+        rightCol.setClipChildren(false);
+        rightCol.setClipToPadding(false);
+        rightCol.setPadding(dp(34), dp(14), dp(22), dp(10));
+        foregroundRoot.addView(rightCol, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+
         FrameLayout rightStage = new FrameLayout(this);
         rightStage.setClipChildren(false);
         rightStage.setClipToPadding(false);
-        rightStage.setPadding(dp(34), dp(14), dp(22), dp(14));
-        foregroundRoot.addView(rightStage, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        rightCol.addView(rightStage, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        controllerHintBar = new P5Views.ControllerHintBar(this);
+        controllerHintBar.setVisibility(View.GONE);
+        LinearLayout.LayoutParams hbLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(26));
+        hbLp.topMargin = dp(4);
+        rightCol.addView(controllerHintBar, hbLp);
 
         tabPanels[TAB_PLAY] = buildPlayPanel();
         tabPanels[TAB_DISPLAY] = buildSettingsPanel(TAB_DISPLAY, t("PANTALLA", "DISPLAY"), "");
@@ -1112,6 +1157,7 @@ public class Launcher extends Activity {
             addOptionRow(list, o);
         }
         tabLists[tab] = list;
+        tabScrolls[tab] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1164,6 +1210,7 @@ public class Launcher extends Activity {
             addOptionRow(list, o);
         }
         tabLists[TAB_CONTROLS] = list;
+        tabScrolls[TAB_CONTROLS] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1460,6 +1507,7 @@ public class Launcher extends Activity {
                 }, null, null, false);
 
         tabLists[TAB_FILES] = list;
+        tabScrolls[TAB_FILES] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1591,6 +1639,7 @@ public class Launcher extends Activity {
             View panel = tabPanels[i];
             if (show) {
                 panel.setVisibility(View.VISIBLE);
+                if (tabScrolls[i] != null) tabScrolls[i].scrollTo(0, 0);
                 LinearLayout list = tabLists[i];
                 if (animate && list != null) {
                     panel.animate().cancel();
@@ -1660,23 +1709,401 @@ public class Launcher extends Activity {
         }
 
         bgView.setSettingsMode(idx != TAB_PLAY, animate);
+
+        focusedRowIdx = 0;
+        focusedBtnIdx = 0;
+        if (controllerMode) {
+            refreshControllerFocus(false);
+            updateControllerHints();
+        }
+    }
+
+    // ---- Physical Controller Navigation Engine ----
+
+    private void setControllerMode(boolean active) {
+        if (controllerMode == active) return;
+        controllerMode = active;
+        if (controllerHintBar != null) {
+            controllerHintBar.setVisibility(active ? View.VISIBLE : View.GONE);
+        }
+        if (active) {
+            refreshControllerFocus(true);
+            updateControllerHints();
+        } else {
+            clearControllerFocusVisuals();
+        }
+    }
+
+    private void clearControllerFocusVisuals() {
+        if (heroPlay != null) heroPlay.setControllerFocused(false);
+        for (int t = 0; t < TAB_COUNT; t++) {
+            LinearLayout list = tabLists[t];
+            if (list == null) continue;
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View child = list.getChildAt(i);
+                if (child instanceof P5Views.AngledRowLayout) {
+                    P5Views.AngledRowLayout row = (P5Views.AngledRowLayout) child;
+                    row.setControllerFocused(false);
+                    setRowChildFocusVisuals(row, false, -1);
+                }
+            }
+        }
+    }
+
+    private boolean isRowInteractive(P5Views.AngledRowLayout row) {
+        if (row.getVisibility() != View.VISIBLE) return false;
+        Object tag = row.getTag();
+        if (tag instanceof Float && ((Float) tag) < 0.7f) return false;
+        if (row.getAlpha() < 0.7f && tag == null) return false;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if ((c instanceof P5Views.SegmentedControl || c instanceof P5Views.SlashButton) && c.isEnabled()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<P5Views.AngledRowLayout> getInteractiveRows(int tab) {
+        List<P5Views.AngledRowLayout> out = new ArrayList<>();
+        LinearLayout list = (tab >= 0 && tab < TAB_COUNT) ? tabLists[tab] : null;
+        if (list == null) return out;
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            if (child instanceof P5Views.AngledRowLayout && isRowInteractive((P5Views.AngledRowLayout) child)) {
+                out.add((P5Views.AngledRowLayout) child);
+            }
+        }
+        return out;
+    }
+
+    private P5Views.SegmentedControl findSegmentedInRow(P5Views.AngledRowLayout row) {
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c instanceof P5Views.SegmentedControl && c.isEnabled()) return (P5Views.SegmentedControl) c;
+        }
+        return null;
+    }
+
+    private List<P5Views.SlashButton> findButtonsInRow(P5Views.AngledRowLayout row) {
+        List<P5Views.SlashButton> out = new ArrayList<>();
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c instanceof P5Views.SlashButton && c.isEnabled()) out.add((P5Views.SlashButton) c);
+        }
+        return out;
+    }
+
+    private void setRowChildFocusVisuals(P5Views.AngledRowLayout row, boolean rowFocused, int btnIdx) {
+        int seenBtn = 0;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c instanceof P5Views.SegmentedControl) {
+                ((P5Views.SegmentedControl) c).setControllerFocused(rowFocused);
+            } else if (c instanceof P5Views.SlashButton) {
+                boolean bf = rowFocused && (seenBtn == btnIdx);
+                ((P5Views.SlashButton) c).setControllerFocused(bf);
+                seenBtn++;
+            }
+        }
+    }
+
+    private void refreshControllerFocus(boolean scrollIntoView) {
+        clearControllerFocusVisuals();
+        if (!controllerMode) return;
+        if (activeTab == TAB_PLAY) {
+            if (heroPlay != null) heroPlay.setControllerFocused(true);
+            return;
+        }
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        if (rows.isEmpty()) return;
+        if (focusedRowIdx < 0) focusedRowIdx = 0;
+        if (focusedRowIdx >= rows.size()) focusedRowIdx = rows.size() - 1;
+        final P5Views.AngledRowLayout row = rows.get(focusedRowIdx);
+        List<P5Views.SlashButton> btns = findButtonsInRow(row);
+        if (focusedBtnIdx < 0 || focusedBtnIdx >= btns.size()) focusedBtnIdx = 0;
+        row.setControllerFocused(true);
+        setRowChildFocusVisuals(row, true, focusedBtnIdx);
+
+        if (scrollIntoView && tabScrolls[activeTab] != null) {
+            final ScrollView sc = tabScrolls[activeTab];
+            sc.post(new Runnable() {
+                @Override
+                public void run() {
+                    int targetY = Math.max(0, row.getTop() - sc.getHeight() / 2 + row.getHeight() / 2);
+                    sc.smoothScrollTo(0, targetY);
+                }
+            });
+        }
+    }
+
+    private void updateControllerHints() {
+        if (controllerHintBar == null) return;
+        String okLbl = P5Views.isXboxGamepadLayout() ? "A" : "A";
+        String backLbl = P5Views.isXboxGamepadLayout() ? "B" : "B";
+        if (activeTab == TAB_PLAY) {
+            controllerHintBar.setHints(
+                    new String[] {okLbl + " / START", "LB / RB", "▲▼"},
+                    new String[] {t("JUGAR", "PLAY"), t("PESTAÑAS", "TABS"), t("MENÚ", "TABS")});
+        } else {
+            controllerHintBar.setHints(
+                    new String[] {"LB / RB", "▲▼", "◀▶", "LT / RT", okLbl, backLbl, "START"},
+                    new String[] {t("PESTAÑAS", "TABS"), t("MOVER", "SELECT"), t("AJUSTAR", "ADJUST"),
+                            t("SECCIÓN", "GROUP"), t("OK", "ACTIVATE"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+        }
+    }
+
+    private void onControllerVertical(int dir) {
+        setControllerMode(true);
+        if (activeTab == TAB_PLAY) {
+            int nextTab = (activeTab + dir + TAB_COUNT) % TAB_COUNT;
+            selectTab(nextTab, true);
+            return;
+        }
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        if (rows.isEmpty()) return;
+        focusedRowIdx = (focusedRowIdx + dir + rows.size()) % rows.size();
+        focusedBtnIdx = 0;
+        P5Feedback.tick(this);
+        refreshControllerFocus(true);
+    }
+
+    private void onControllerHorizontal(int dir) {
+        setControllerMode(true);
+        if (activeTab == TAB_PLAY) return;
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        if (rows.isEmpty() || focusedRowIdx >= rows.size()) return;
+        P5Views.AngledRowLayout row = rows.get(focusedRowIdx);
+        P5Views.SegmentedControl seg = findSegmentedInRow(row);
+        if (seg != null) {
+            seg.step(dir);
+            return;
+        }
+        List<P5Views.SlashButton> btns = findButtonsInRow(row);
+        if (btns.size() > 1) {
+            int next = (focusedBtnIdx + dir + btns.size()) % btns.size();
+            if (next != focusedBtnIdx) {
+                focusedBtnIdx = next;
+                P5Feedback.tick(this);
+                refreshControllerFocus(false);
+            }
+        }
+    }
+
+    private void onControllerSectionJump(int dir) {
+        setControllerMode(true);
+        if (activeTab == TAB_PLAY) {
+            selectTab((activeTab + dir + TAB_COUNT) % TAB_COUNT, true);
+            return;
+        }
+        LinearLayout list = tabLists[activeTab];
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        if (list == null || rows.isEmpty()) return;
+
+        // Collect interactive row indices that start each GroupSubHeaderView section
+        List<Integer> groupStarts = new ArrayList<>();
+        boolean nextStartsGroup = true;
+        int rowOrdinal = 0;
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            if (child instanceof P5Views.GroupSubHeaderView) {
+                nextStartsGroup = true;
+            } else if (child instanceof P5Views.AngledRowLayout && isRowInteractive((P5Views.AngledRowLayout) child)) {
+                if (nextStartsGroup) {
+                    groupStarts.add(rowOrdinal);
+                    nextStartsGroup = false;
+                }
+                rowOrdinal++;
+            }
+        }
+        if (groupStarts.size() <= 1) return;
+
+        int target = groupStarts.get(0);
+        if (dir > 0) {
+            boolean found = false;
+            for (int gs : groupStarts) {
+                if (gs > focusedRowIdx) {
+                    target = gs;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) target = groupStarts.get(0);
+        } else {
+            boolean found = false;
+            for (int i = groupStarts.size() - 1; i >= 0; i--) {
+                if (groupStarts.get(i) < focusedRowIdx) {
+                    target = groupStarts.get(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) target = groupStarts.get(groupStarts.size() - 1);
+        }
+        focusedRowIdx = target;
+        focusedBtnIdx = 0;
+        P5Feedback.tab(this);
+        refreshControllerFocus(true);
+    }
+
+    private void onControllerConfirm() {
+        setControllerMode(true);
+        if (activeTab == TAB_PLAY) {
+            onPlayClicked();
+            return;
+        }
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        if (rows.isEmpty() || focusedRowIdx >= rows.size()) return;
+        P5Views.AngledRowLayout row = rows.get(focusedRowIdx);
+        P5Views.SegmentedControl seg = findSegmentedInRow(row);
+        if (seg != null) {
+            seg.cycle();
+            return;
+        }
+        List<P5Views.SlashButton> btns = findButtonsInRow(row);
+        if (!btns.isEmpty()) {
+            int bi = Math.max(0, Math.min(btns.size() - 1, focusedBtnIdx));
+            btns.get(bi).performClick();
+        }
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (ev.getAction() == MotionEvent.ACTION_DOWN && controllerMode) {
+            setControllerMode(false);
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        int action = event.getAction();
+        boolean handledKey =
+                keyCode == KeyEvent.KEYCODE_BUTTON_L1 || keyCode == KeyEvent.KEYCODE_BUTTON_R1
+                || keyCode == KeyEvent.KEYCODE_BUTTON_L2 || keyCode == KeyEvent.KEYCODE_BUTTON_R2
+                || keyCode == KeyEvent.KEYCODE_BUTTON_START
+                || keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                || keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
+                || keyCode == KeyEvent.KEYCODE_BUTTON_A || keyCode == KeyEvent.KEYCODE_BUTTON_B
+                || keyCode == KeyEvent.KEYCODE_BUTTON_X || keyCode == KeyEvent.KEYCODE_BUTTON_Y;
+
+        if (!handledKey) return super.dispatchKeyEvent(event);
+        if (action == KeyEvent.ACTION_UP) return true;
+        if (action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event);
+
         if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
+            setControllerMode(true);
             selectTab((activeTab + TAB_COUNT - 1) % TAB_COUNT, true);
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_BUTTON_R1) {
+            setControllerMode(true);
             selectTab((activeTab + 1) % TAB_COUNT, true);
             return true;
         }
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_START || keyCode == KeyEvent.KEYCODE_BUTTON_X) {
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_L2) {
+            onControllerSectionJump(-1);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_R2) {
+            onControllerSectionJump(1);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_START) {
+            setControllerMode(true);
             onPlayClicked();
             return true;
         }
-        return super.onKeyDown(keyCode, event);
+        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+            onControllerVertical(-1);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+            onControllerVertical(1);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+            onControllerHorizontal(-1);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            onControllerHorizontal(1);
+            return true;
+        }
+        if (P5Views.isConfirmKey(keyCode)) {
+            onControllerConfirm();
+            return true;
+        }
+        if (P5Views.isBackKey(keyCode)) {
+            setControllerMode(true);
+            if (activeTab != TAB_PLAY) {
+                P5Feedback.cancel(this);
+                selectTab(TAB_PLAY, true);
+            }
+            return true;
+        }
+        return true;
+    }
+
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                || (event.getSource() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) {
+            float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
+            float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
+            float lx = event.getAxisValue(MotionEvent.AXIS_X);
+            float ly = event.getAxisValue(MotionEvent.AXIS_Y);
+            float x = Math.abs(hatX) > 0.3f ? hatX : lx;
+            float y = Math.abs(hatY) > 0.3f ? hatY : ly;
+
+            int newY = (y > 0.55f) ? 1 : (y < -0.55f) ? -1 : (Math.abs(y) < 0.30f ? 0 : stickDirY);
+            int newX = (x > 0.55f) ? 1 : (x < -0.55f) ? -1 : (Math.abs(x) < 0.30f ? 0 : stickDirX);
+
+            if (newY != stickDirY) {
+                stickDirY = newY;
+                stickRepeatHandler.removeCallbacks(stickRepeatTask);
+                if (stickDirY != 0) {
+                    onControllerVertical(stickDirY);
+                    stickRepeatHandler.postDelayed(stickRepeatTask, 320L);
+                }
+            }
+            if (newX != stickDirX) {
+                stickDirX = newX;
+                if (stickDirY == 0) {
+                    stickRepeatHandler.removeCallbacks(stickRepeatTask);
+                    if (stickDirX != 0) {
+                        onControllerHorizontal(stickDirX);
+                        stickRepeatHandler.postDelayed(stickRepeatTask, 320L);
+                    }
+                }
+            }
+
+            // Analog triggers L2 / R2 for section jumping
+            float lt = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
+            float rt = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
+            if (lt > 0.55f && !ltDown) {
+                ltDown = true;
+                onControllerSectionJump(-1);
+            } else if (lt < 0.25f) {
+                ltDown = false;
+            }
+            if (rt > 0.55f && !rtDown) {
+                rtDown = true;
+                onControllerSectionJump(1);
+            } else if (rt < 0.25f) {
+                rtDown = false;
+            }
+
+            // Right stick vertical smooth scroll on active settings tab
+            float rz = event.getAxisValue(MotionEvent.AXIS_RZ);
+            if (Math.abs(rz) > 0.22f && activeTab != TAB_PLAY && tabScrolls[activeTab] != null) {
+                tabScrolls[activeTab].scrollBy(0, Math.round(rz * dp(18)));
+            }
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
     }
 
     // ---- Launch action ----
@@ -1777,6 +2204,8 @@ public class Launcher extends Activity {
         boolean touchOn = touchShow == null || "1".equals(touchShow.values[touchShow.pick]);
         Option sharpModeOpt = findOption("SHARPEN_MODE");
         boolean sharpenOn = sharpModeOpt != null && !"off".equals(sharpModeOpt.values[sharpModeOpt.pick]);
+        Option gpLayoutOpt = findOption("NX_GAMEPAD_LAYOUT");
+        P5Views.setXboxGamepadLayout(gpLayoutOpt != null && "1".equals(gpLayoutOpt.values[gpLayoutOpt.pick]));
 
         for (Option o : options) {
             if (o.segView != null) o.segView.setSelectedIndex(o.pick);
