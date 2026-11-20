@@ -36,6 +36,7 @@ final class P5Views {
 
     // Synced with Launcher's NX_GAMEPAD_LAYOUT ("1" = Xbox/PC: A=Confirm, B=Back; "0" = Nintendo: B=Confirm, A=Back)
     private static boolean sXboxGamepadLayout = false;
+    private static boolean sControllerMode = false;
 
     static void setXboxGamepadLayout(boolean xbox) {
         sXboxGamepadLayout = xbox;
@@ -43,6 +44,14 @@ final class P5Views {
 
     static boolean isXboxGamepadLayout() {
         return sXboxGamepadLayout;
+    }
+
+    static void setControllerModeActive(boolean active) {
+        sControllerMode = active;
+    }
+
+    static boolean isControllerModeActive() {
+        return sControllerMode;
     }
 
     static boolean isConfirmKey(int keyCode) {
@@ -137,8 +146,12 @@ final class P5Views {
                 x += tw + 1.2f * d;
             }
 
-            // Row 2: Slanted "ROYAL" cut-paper ribbon tucked underneath
-            float rx = 18 * d, ry = 36 * d, rw = 96 * d, rh = 18 * d;
+            // Row 2: Slanted "ROYAL" cut-paper ribbon optically centered underneath "PERSONA 5"
+            float rw = 96 * d, rh = 18 * d;
+            float wordStart = 6 * d;
+            float wordEnd = x - 1.2f * d;
+            float rx = (wordStart + wordEnd - rw) * 0.5f;
+            float ry = 36 * d;
             P5Theme.setSlantedQuad(royalPoly, rx, ry, rx + rw, ry + rh, 5 * d, 5 * d);
             boxPaint.setColor(P5Theme.PAPER_WHITE);
             c.save();
@@ -820,6 +833,148 @@ final class P5Views {
         }
     }
 
+    // ---- 6c. Slanted Inline Sub-Tab Bar (Placed beside SectionHeaderView, LT/RT navigable) ----
+
+    static final class SubTabBar extends View {
+        interface OnSubTabListener {
+            void onPick(int index);
+        }
+
+        private final String[] labels;
+        private int selected = 0;
+        private boolean showTriggers = false;
+        private final OnSubTabListener listener;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint trigPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path poly = new Path();
+        private float[] pillLefts;
+        private float[] pillRights;
+
+        SubTabBar(Context context, String[] labels, int selected, OnSubTabListener listener) {
+            super(context);
+            this.labels = labels;
+            this.selected = selected;
+            this.listener = listener;
+            this.pillLefts = new float[labels.length];
+            this.pillRights = new float[labels.length];
+            setClickable(true);
+            setFocusable(false);
+            textPaint.setTypeface(P5Theme.condensedBold());
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            trigPaint.setTypeface(P5Theme.condensedBold());
+            trigPaint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        void setSelected(int idx) {
+            if (idx >= 0 && idx < labels.length && idx != selected) {
+                selected = idx;
+                invalidate();
+            }
+        }
+
+        void setShowTriggers(boolean show) {
+            if (this.showTriggers != show) {
+                this.showTriggers = show;
+                requestLayout();
+                invalidate();
+            }
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            float d = P5Theme.dp(getContext(), 1f);
+            textPaint.setTextSize(11.5f * d);
+            float total = 4 * d;
+            if (showTriggers) total += 26 * d * 2f + 8 * d;
+            for (int i = 0; i < labels.length; i++) {
+                float pw = Math.max(54 * d, textPaint.measureText(labels[i]) + 22 * d);
+                total += pw + (i > 0 ? 4 * d : 0f);
+            }
+            int w = Math.round(total + 6 * d);
+            int h = P5Theme.dpx(getContext(), 32);
+            setMeasuredDimension(resolveSize(w, wSpec), h);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                float tx = e.getX();
+                for (int i = 0; i < labels.length; i++) {
+                    if (tx >= pillLefts[i] && tx <= pillRights[i]) {
+                        if (i != selected) {
+                            selected = i;
+                            P5Feedback.tab(getContext());
+                            invalidate();
+                            if (listener != null) listener.onPick(i);
+                        }
+                        return true;
+                    }
+                }
+            }
+            return super.onTouchEvent(e);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = P5Theme.dp(getContext(), 1f);
+            float w = getWidth(), h = getHeight();
+            float skew = 6f * d;
+            float top = 3 * d, bot = h - 3 * d;
+
+            textPaint.setTextSize(11.5f * d);
+            trigPaint.setTextSize(9.5f * d);
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float base = (top + bot) * 0.5f - (fm.ascent + fm.descent) * 0.5f;
+            Paint.FontMetrics tfm = trigPaint.getFontMetrics();
+            float tBase = (top + bot) * 0.5f - (tfm.ascent + tfm.descent) * 0.5f;
+
+            float x = 2 * d;
+            if (showTriggers) {
+                float tw = 22 * d;
+                P5Theme.setSlantedQuad(poly, x, top + 3 * d, x + tw, bot - 3 * d, 3.5f * d, 3.5f * d);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(selected > 0 ? P5Theme.ACID_YELLOW : Color.argb(90, 246, 245, 240));
+                c.drawPath(poly, paint);
+                trigPaint.setColor(P5Theme.INK_BLACK);
+                c.drawText("LT", x + tw * 0.5f, tBase, trigPaint);
+                x += tw + 5 * d;
+            }
+
+            for (int i = 0; i < labels.length; i++) {
+                boolean act = (i == selected);
+                float pw = Math.max(54 * d, textPaint.measureText(labels[i]) + 22 * d);
+                pillLefts[i] = x;
+                pillRights[i] = x + pw;
+
+                P5Theme.setSlantedQuad(poly, x, top, x + pw, bot, skew, skew);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(act ? P5Theme.PAPER_WHITE : Color.argb(185, 20, 20, 26));
+                c.drawPath(poly, paint);
+
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth((act ? 2.0f : 1.2f) * d);
+                paint.setColor(act ? P5Theme.P5_RED : P5Theme.BORDER_SUBTLE);
+                c.drawPath(poly, paint);
+
+                textPaint.setColor(act ? P5Theme.INK_BLACK : Color.argb(210, 246, 245, 240));
+                c.drawText(labels[i], x + pw * 0.5f, base, textPaint);
+                x += pw + 4 * d;
+            }
+
+            if (showTriggers) {
+                x += 1 * d;
+                float tw = 22 * d;
+                P5Theme.setSlantedQuad(poly, x, top + 3 * d, x + tw, bot - 3 * d, 3.5f * d, 3.5f * d);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(selected < labels.length - 1 ? P5Theme.ACID_YELLOW : Color.argb(90, 246, 245, 240));
+                c.drawPath(poly, paint);
+                trigPaint.setColor(P5Theme.INK_BLACK);
+                c.drawText("RT", x + tw * 0.5f, tBase, trigPaint);
+            }
+        }
+    }
+
     // ---- 6. Angled Section Header Banner ----
 
     static final class SectionHeaderView extends View {
@@ -1294,7 +1449,10 @@ final class P5Views {
         frame.addView(sc, scLp);
 
         final int[] focused = {Math.max(0, Math.min(labels.length - 1, current))};
-        final boolean[] focusVisible = {false};
+        final boolean[] focusVisible = {sControllerMode};
+        if (sControllerMode && !buttons.isEmpty()) {
+            buttons.get(focused[0]).setControllerFocused(true);
+        }
         dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
             @Override
             public boolean onKey(DialogInterface d, int keyCode, KeyEvent event) {
@@ -1420,7 +1578,10 @@ final class P5Views {
         frame.addView(actions, new LinearLayout.LayoutParams(contentW, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         final int[] focused = {actionBtns.size() - 1};
-        final boolean[] focusVisible = {false};
+        final boolean[] focusVisible = {sControllerMode};
+        if (sControllerMode && !actionBtns.isEmpty()) {
+            actionBtns.get(focused[0]).setControllerFocused(true);
+        }
         dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
             @Override
             public boolean onKey(DialogInterface d, int keyCode, KeyEvent event) {
