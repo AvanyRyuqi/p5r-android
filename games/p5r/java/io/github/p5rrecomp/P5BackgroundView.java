@@ -61,6 +61,7 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
     private final Path topWedgePath = new Path();
 
     private boolean settingsMode = false;
+    private boolean animatedDefault = true;
     private int wallpaperDimLevel = 1; // 0 = light, 1 = medium, 2 = dark
     private float scrimAlpha = 0f; // 0 = home, 1 = settings
     private float slashProgress = 1f; // 0 -> 1 kinetic sweep on tab switch
@@ -124,7 +125,8 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
     }
 
     private void updateMotionState() {
-        boolean wantMotion = hostResumed && isAttachedToWindow() && (wallpaper == null || wallpaper.isRecycled());
+        boolean wantMotion = hostResumed && isAttachedToWindow() && animatedDefault
+                && (wallpaper == null || wallpaper.isRecycled());
         if (wantMotion == motionRunning) return;
         motionRunning = wantMotion;
         if (wantMotion) {
@@ -270,6 +272,20 @@ final class P5BackgroundView extends View implements SensorEventListener, Choreo
             this.halftoneMode = clamped;
             invalidate();
         }
+    }
+
+    void setAnimatedDefault(boolean animated) {
+        if (this.animatedDefault == animated) return;
+        this.animatedDefault = animated;
+        if (!animated) {
+            targetTiltX = 0f;
+            targetTiltY = 0f;
+            smoothTiltX = 0f;
+            smoothTiltY = 0f;
+            ribbonBoostVel = 0f;
+        }
+        updateMotionState();
+        invalidate();
     }
 
     void setSettingsMode(boolean settings, boolean animate) {

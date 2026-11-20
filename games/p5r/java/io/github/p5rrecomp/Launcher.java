@@ -125,8 +125,11 @@ public class Launcher extends Activity {
     private TextView wpSub;
     private View wpDimRow;
     private P5Views.SegmentedControl wpDimSeg;
+    private View wpMotionRow;
+    private P5Views.SegmentedControl wpMotionSeg;
     private View wpHalftoneRow;
     private P5Views.SegmentedControl wpHalftoneSeg;
+    private P5Views.SegmentedControl sfxSeg;
 
     private Bitmap currentWallpaperBmp;
     private boolean hasPausedOnce = false;
@@ -356,10 +359,29 @@ public class Launcher extends Activity {
         if (bgView != null) bgView.setHalftoneMode(clamped);
     }
 
+    boolean animatedDefaultWallpaper() {
+        return prefs().getBoolean("wp_animated", true);
+    }
+
+    void setAnimatedDefaultWallpaper(boolean animated) {
+        prefs().edit().putBoolean("wp_animated", animated).apply();
+        if (bgView != null) bgView.setAnimatedDefault(animated);
+    }
+
+    boolean launcherSfxEnabled() {
+        return prefs().getBoolean("launcher_sfx", true);
+    }
+
+    void setLauncherSfxEnabled(boolean enabled) {
+        prefs().edit().putBoolean("launcher_sfx", enabled).apply();
+        P5Feedback.setSfxEnabled(enabled);
+    }
+
     void loadWallpaper() {
         if (bgView != null) {
             bgView.setWallpaperDim(wallpaperDim());
             bgView.setHalftoneMode(halftoneMode());
+            bgView.setAnimatedDefault(animatedDefaultWallpaper());
         }
         File f = wallpaperFile();
         if (!f.canRead()) {
@@ -435,6 +457,15 @@ public class Launcher extends Activity {
             wpDimSeg.setEnabled(custom);
             wpDimSeg.setSelectedIndex(wallpaperDim());
         }
+        if (wpMotionRow != null) {
+            float alpha = custom ? 0.36f : 1.0f;
+            wpMotionRow.setTag(alpha);
+            wpMotionRow.setAlpha(alpha);
+        }
+        if (wpMotionSeg != null) {
+            wpMotionSeg.setEnabled(!custom);
+            wpMotionSeg.setSelectedIndex(animatedDefaultWallpaper() ? 1 : 0);
+        }
         if (wpHalftoneRow != null) {
             float alpha = custom ? 0.36f : 1.0f;
             wpHalftoneRow.setTag(alpha);
@@ -443,6 +474,9 @@ public class Launcher extends Activity {
         if (wpHalftoneSeg != null) {
             wpHalftoneSeg.setEnabled(!custom);
             wpHalftoneSeg.setSelectedIndex(halftoneMode());
+        }
+        if (sfxSeg != null) {
+            sfxSeg.setSelectedIndex(launcherSfxEnabled() ? 1 : 0);
         }
     }
 
@@ -490,6 +524,8 @@ public class Launcher extends Activity {
             getWindow().setAttributes(lp);
         }
         hideSystemBars();
+        P5Feedback.init(this);
+        P5Feedback.setSfxEnabled(launcherSfxEnabled());
         initOptions();
         boolean playIntro = (state == null);
         buildUi(playIntro);
@@ -558,6 +594,7 @@ public class Launcher extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        P5Feedback.release();
         if (currentWallpaperBmp != null) {
             currentWallpaperBmp.recycle();
             currentWallpaperBmp = null;
@@ -577,7 +614,7 @@ public class Launcher extends Activity {
     }
 
     private void initOptions() {
-        // DISPLAY
+        // DISPLAY (Resolution & Scaling -> Widescreen & Framing -> Language)
         options.add(new Option(TAB_DISPLAY, "RESOLUTION",
                 "Resolución 3D", "3D Resolution",
                 "Escala de renderizado 3D (la interfaz se mantiene nítida)",
@@ -585,6 +622,20 @@ public class Launcher extends Activity {
                 new String[] {"360p", "480p", "540p", "720p", "1080p"},
                 new String[] {"360P", "480P", "540P", "720P", "1080P"},
                 new String[] {"360P", "480P", "540P", "720P", "1080P"}, 3, false));
+        options.add(new Option(TAB_DISPLAY, "NX_HUD_1080",
+                "Resolución de interfaz", "Interface Resolution",
+                "720p es más rápido; 1080p hace el texto más fino",
+                "720p is faster; 1080p renders sharper menus and portraits",
+                new String[] {"0", "1"},
+                new String[] {"720P", "1080P"},
+                new String[] {"720P", "1080P"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_FSR",
+                "Superresolución (FSR 1.0)", "Super Resolution (FSR 1.0)",
+                "Reescalado y nitidez en la salida final (coste extra en GPU)",
+                "Upscaling and sharpening pass on output (adds GPU cost)",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
         options.add(new Option(TAB_DISPLAY, "NX_ULTRAWIDE",
                 "Pantalla ancha real (Hor+)", "True Widescreen (Hor+)",
                 "Amplía el campo de visión horizontal en pantallas 20:9 / 21:9",
@@ -606,20 +657,6 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
-        options.add(new Option(TAB_DISPLAY, "NX_FSR",
-                "Superresolución (FSR 1.0)", "Super Resolution (FSR 1.0)",
-                "Reescalado y nitidez en la salida final (coste extra en GPU)",
-                "Upscaling and sharpening pass on output (adds GPU cost)",
-                new String[] {"0", "1"},
-                new String[] {"NO", "SÍ"},
-                new String[] {"OFF", "ON"}, 0, false));
-        options.add(new Option(TAB_DISPLAY, "NX_HUD_1080",
-                "Resolución de interfaz", "Interface Resolution",
-                "720p es más rápido; 1080p hace el texto más fino",
-                "720p is faster; 1080p renders sharper menus and portraits",
-                new String[] {"0", "1"},
-                new String[] {"720P", "1080P"},
-                new String[] {"720P", "1080P"}, 0, false));
         options.add(new Option(TAB_DISPLAY, "language",
                 "Idioma de textos y subtítulos", "Text & Subtitle Language",
                 "Idioma del texto del juego (las voces se eligen dentro del juego)",
@@ -630,14 +667,7 @@ public class Launcher extends Activity {
                 new String[] {"Automatic", "English", "Español", "Français", "Deutsch",
                         "Italiano", "日本語", "한국어", "简体中文", "繁體中文"}, 0, true));
 
-        // PERFORMANCE
-        options.add(new Option(TAB_PERFORMANCE, "GRAPHICS",
-                "Calidad de texturas", "Texture Quality",
-                "Ajusta el sesgo de mipmaps (Bajo reduce uso de memoria)",
-                "Controls texture mipmap LOD bias (Low saves bandwidth)",
-                new String[] {"low", "medium", "high"},
-                new String[] {"BAJO", "MEDIO", "ALTO"},
-                new String[] {"LOW", "MED", "HIGH"}, 0, false));
+        // PERFORMANCE (Engine & Pacing -> Visual Quality -> Diagnostics)
         options.add(new Option(TAB_PERFORMANCE, "NX_FPS_CAP",
                 "Límite de FPS", "Frame Rate Cap",
                 "30 fps es estable; 60 fps es experimental",
@@ -645,6 +675,20 @@ public class Launcher extends Activity {
                 new String[] {"30", "60"},
                 new String[] {"30 FPS", "60 FPS"},
                 new String[] {"30 FPS", "60 FPS"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_REPLAY_THREAD",
+                "Hilo de replay asíncrono", "Async Replay Thread",
+                "Separa la grabación de comandos del replay de Vulkan (más FPS)",
+                "Overlaps command recording and Vulkan replay across Big cores",
+                new String[] {"0", "1"},
+                new String[] {"NO", "SÍ"},
+                new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "GRAPHICS",
+                "Calidad de texturas", "Texture Quality",
+                "Ajusta el sesgo de mipmaps (Bajo reduce uso de memoria)",
+                "Controls texture mipmap LOD bias (Low saves bandwidth)",
+                new String[] {"low", "medium", "high"},
+                new String[] {"BAJO", "MEDIO", "ALTO"},
+                new String[] {"LOW", "MED", "HIGH"}, 0, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_SHADOWS",
                 "Sombras dinámicas", "Dynamic Shadows",
                 "Desactivarlas ahorra ~9% de GPU en escenas 3D",
@@ -659,13 +703,6 @@ public class Launcher extends Activity {
                 new String[] {"1", "0"},
                 new String[] {"0.5X", "1.0X"},
                 new String[] {"0.5X", "1.0X"}, 0, false));
-        options.add(new Option(TAB_PERFORMANCE, "NX_NO_CROWD",
-                "Multitudes de NPCs", "Crowd NPCs",
-                "Desactivarlas mejora los FPS en zonas llenas como Shibuya",
-                "Disabling removes background crowds for higher FPS in cities",
-                new String[] {"1", "0"},
-                new String[] {"NO", "SÍ"},
-                new String[] {"OFF", "ON"}, 1, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_DISABLE_BLOOM",
                 "Post-procesado (Bloom)", "Bloom Post-Processing",
                 "Desactivarlo omite 12 pasadas de desenfoque HDR por frame",
@@ -673,13 +710,13 @@ public class Launcher extends Activity {
                 new String[] {"1", "0"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 1, false));
-        options.add(new Option(TAB_PERFORMANCE, "NX_REPLAY_THREAD",
-                "Hilo de replay asíncrono", "Async Replay Thread",
-                "Separa la grabación de comandos del replay de Vulkan (más FPS)",
-                "Overlaps command recording and Vulkan replay across Big cores",
-                new String[] {"0", "1"},
+        options.add(new Option(TAB_PERFORMANCE, "NX_NO_CROWD",
+                "Multitudes de NPCs", "Crowd NPCs",
+                "Desactivarlas mejora los FPS en zonas llenas como Shibuya",
+                "Disabling removes background crowds for higher FPS in cities",
+                new String[] {"1", "0"},
                 new String[] {"NO", "SÍ"},
-                new String[] {"OFF", "ON"}, 0, false));
+                new String[] {"OFF", "ON"}, 1, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_SHOW_FPS",
                 "Contador de FPS", "FPS Counter",
                 "Muestra la tasa de fotogramas en pantalla durante el juego",
@@ -695,7 +732,7 @@ public class Launcher extends Activity {
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
 
-        // CONTROLS
+        // CONTROLS (Touchscreen -> Gamepad)
         options.add(new Option(TAB_CONTROLS, "NX_TOUCH_SHOW",
                 "Controles táctiles", "On-Screen Controls",
                 "Habilita o desactiva el mando virtual táctil",
@@ -724,13 +761,6 @@ public class Launcher extends Activity {
                 new String[] {"50", "85", "100"},
                 new String[] {"50%", "85%", "100%"},
                 new String[] {"50%", "85%", "100%"}, 1, false));
-        options.add(new Option(TAB_CONTROLS, "NX_GAMEPAD_LAYOUT",
-                "Distribución del mando físico", "Physical Gamepad Layout",
-                "Mapeo de botones A/B/X/Y para mandos Bluetooth o USB",
-                "Face button mapping for Bluetooth / USB controllers",
-                new String[] {"0", "1"},
-                new String[] {"NINTENDO", "XBOX / PC"},
-                new String[] {"NINTENDO", "XBOX / PC"}, 0, false));
         options.add(new Option(TAB_CONTROLS, "NX_STICK_SENSITIVITY",
                 "Sensibilidad palanca táctil", "Touch Stick Sensitivity",
                 "Velocidad de respuesta del stick izquierdo táctil",
@@ -745,6 +775,13 @@ public class Launcher extends Activity {
                 new String[] {"50", "75", "100", "125", "150", "200", "250"},
                 new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"},
                 new String[] {"50%", "75%", "100%", "125%", "150%", "200%", "250%"}, 2, true));
+        options.add(new Option(TAB_CONTROLS, "NX_GAMEPAD_LAYOUT",
+                "Distribución del mando físico", "Physical Gamepad Layout",
+                "Mapeo de botones A/B/X/Y para mandos Bluetooth o USB",
+                "Face button mapping for Bluetooth / USB controllers",
+                new String[] {"0", "1"},
+                new String[] {"NINTENDO", "XBOX / PC"},
+                new String[] {"NINTENDO", "XBOX / PC"}, 0, false));
     }
 
     // ---- UI construction (Direction A: P5 Pause / Calling Card) ----
@@ -799,10 +836,8 @@ public class Launcher extends Activity {
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
         tabPanels[TAB_PLAY] = buildPlayPanel();
-        tabPanels[TAB_DISPLAY] = buildSettingsPanel(TAB_DISPLAY,
-                t("PANTALLA", "DISPLAY"), t("RES · HOR+ · FSR", "RES · HOR+ · FSR"));
-        tabPanels[TAB_PERFORMANCE] = buildSettingsPanel(TAB_PERFORMANCE,
-                t("RENDIMIENTO", "PERFORMANCE"), t("FPS · SOMBRAS · GPU", "FPS · SHADOWS · GPU"));
+        tabPanels[TAB_DISPLAY] = buildSettingsPanel(TAB_DISPLAY, t("PANTALLA", "DISPLAY"), "");
+        tabPanels[TAB_PERFORMANCE] = buildSettingsPanel(TAB_PERFORMANCE, t("RENDIMIENTO", "PERFORMANCE"), "");
         tabPanels[TAB_CONTROLS] = buildControlsPanel();
         tabPanels[TAB_FILES] = buildFilesPanel();
 
@@ -977,6 +1012,15 @@ public class Launcher extends Activity {
         return b;
     }
 
+    private void addGroupHeader(LinearLayout parent, String label, boolean topGap) {
+        P5Views.GroupSubHeaderView gh = new P5Views.GroupSubHeaderView(this, label);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(22));
+        lp.topMargin = topGap ? dp(8) : 0;
+        lp.bottomMargin = dp(4);
+        parent.addView(gh, lp);
+    }
+
     private View buildSettingsPanel(int tab, String title, String subtitle) {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
@@ -984,7 +1028,7 @@ public class Launcher extends Activity {
         P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this, title, subtitle);
         LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(8);
+        hLp.bottomMargin = dp(6);
         col.addView(hdr, hLp);
 
         ScrollView scroll = new ScrollView(this);
@@ -993,10 +1037,28 @@ public class Launcher extends Activity {
         scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(6), 0, dp(16));
+        list.setPadding(0, dp(4), 0, dp(16));
 
         for (Option o : options) {
-            if (o.tab == tab) addOptionRow(list, o);
+            if (o.tab != tab) continue;
+            if (tab == TAB_DISPLAY) {
+                if ("RESOLUTION".equals(o.key)) {
+                    addGroupHeader(list, t("RESOLUCIÓN Y ESCALADO", "RESOLUTION & SCALING"), false);
+                } else if ("NX_ULTRAWIDE".equals(o.key)) {
+                    addGroupHeader(list, t("PANTALLA ANCHA Y ENCUADRE", "WIDESCREEN & FRAMING"), true);
+                } else if ("language".equals(o.key)) {
+                    addGroupHeader(list, t("IDIOMA", "LANGUAGE"), true);
+                }
+            } else if (tab == TAB_PERFORMANCE) {
+                if ("NX_FPS_CAP".equals(o.key)) {
+                    addGroupHeader(list, t("MOTOR Y FLUIDEZ", "ENGINE & PACING"), false);
+                } else if ("GRAPHICS".equals(o.key)) {
+                    addGroupHeader(list, t("CALIDAD VISUAL", "VISUAL QUALITY"), true);
+                } else if ("NX_SHOW_FPS".equals(o.key)) {
+                    addGroupHeader(list, t("DIAGNÓSTICO", "DIAGNOSTICS"), true);
+                }
+            }
+            addOptionRow(list, o);
         }
         tabLists[tab] = list;
         scroll.addView(list);
@@ -1010,10 +1072,10 @@ public class Launcher extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
 
         P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
-                t("CONTROLES", "CONTROLS"), t("TÁCTIL · MANDO", "TOUCH · GAMEPAD"));
+                t("CONTROLES", "CONTROLS"), "");
         LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(8);
+        hLp.bottomMargin = dp(6);
         col.addView(hdr, hLp);
 
         ScrollView scroll = new ScrollView(this);
@@ -1022,9 +1084,13 @@ public class Launcher extends Activity {
         scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(6), 0, dp(16));
+        list.setPadding(0, dp(4), 0, dp(16));
 
-        // Top action row: Move Controls Editor
+        addGroupHeader(list, t("CONTROLES TÁCTILES", "TOUCHSCREEN"), false);
+        Option touchShow = findOption("NX_TOUCH_SHOW");
+        if (touchShow != null) addOptionRow(list, touchShow);
+
+        // Move Controls Editor right beneath master On-Screen Controls toggle
         addActionRow(list,
                 t("Posición de controles táctiles", "On-Screen Controls Layout"),
                 t("Arrastra y acomoda los botones directamente en pantalla",
@@ -1040,7 +1106,11 @@ public class Launcher extends Activity {
                 }, null, null, true);
 
         for (Option o : options) {
-            if (o.tab == TAB_CONTROLS) addOptionRow(list, o);
+            if (o.tab != TAB_CONTROLS || "NX_TOUCH_SHOW".equals(o.key)) continue;
+            if ("NX_GAMEPAD_LAYOUT".equals(o.key)) {
+                addGroupHeader(list, t("MANDO FÍSICO", "GAMEPAD"), true);
+            }
+            addOptionRow(list, o);
         }
         tabLists[TAB_CONTROLS] = list;
         scroll.addView(list);
@@ -1054,10 +1124,10 @@ public class Launcher extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
 
         P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
-                t("ARCHIVOS Y MODS", "FILES & MODS"), t("DATOS · PARTIDAS · DRIVERS", "DATA · SAVES · DRIVERS"));
+                t("ARCHIVOS Y MODS", "FILES & MODS"), "");
         LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(8);
+        hLp.bottomMargin = dp(6);
         col.addView(hdr, hLp);
 
         ScrollView scroll = new ScrollView(this);
@@ -1066,7 +1136,9 @@ public class Launcher extends Activity {
         scroll.setFadingEdgeLength(dp(14));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(6), 0, dp(16));
+        list.setPadding(0, dp(4), 0, dp(16));
+
+        addGroupHeader(list, t("JUEGO Y DATOS", "GAME & DATA"), false);
 
         gameSub = addActionRow(list,
                 t("Archivo del juego (.nsp / .xci)", "Game File (.nsp / .xci)"),
@@ -1134,6 +1206,8 @@ public class Launcher extends Activity {
                     public void onClick(View v) { removeDriver(); }
                 }, false);
 
+        addGroupHeader(list, t("APARIENCIA DEL LANZADOR", "LAUNCHER APPEARANCE"), true);
+
         wpSub = addActionRow(list,
                 t("Fondo del lanzador", "Launcher Wallpaper"),
                 t("Fondo por defecto", "Default Wallpaper"),
@@ -1148,39 +1222,39 @@ public class Launcher extends Activity {
                     public void onClick(View v) { resetLauncherWallpaper(); }
                 }, false);
 
-        // Wallpaper Dim control (active when a custom wallpaper image is applied)
-        P5Views.AngledRowLayout dimRow = new P5Views.AngledRowLayout(this);
-        LinearLayout dimTextCol = new LinearLayout(this);
-        dimTextCol.setOrientation(LinearLayout.VERTICAL);
-        dimTextCol.setPadding(dp(4), 0, dp(10), 0);
-        TextView dimTitle = new TextView(this);
-        dimTitle.setText(t("Oscurecer fondo personalizado", "Wallpaper Dim"));
-        dimTitle.setTypeface(P5Theme.condensedBold());
-        dimTitle.setTextSize(15.5f);
-        dimTitle.setTextColor(P5Theme.PAPER_WHITE);
-        dimTextCol.addView(dimTitle);
-        TextView dimDesc = new TextView(this);
-        dimDesc.setText(t("Ajusta el contraste sobre tu imagen de fondo",
-                "Controls overlay darkness over your custom wallpaper"));
-        dimDesc.setTypeface(P5Theme.bodyRegular());
-        dimDesc.setTextSize(11.5f);
-        dimDesc.setTextColor(P5Theme.MUTED_TEXT);
-        dimTextCol.addView(dimDesc);
-        dimRow.addView(dimTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        String[] dimLabels = new String[] {
-            t("SUAVE", "LIGHT"), t("MEDIO", "MED"), t("OSCURO", "DARK")
+        // Default Wallpaper Motion (Static / Animated — greyed out when a custom wallpaper is active)
+        P5Views.AngledRowLayout motRow = new P5Views.AngledRowLayout(this);
+        LinearLayout motTextCol = new LinearLayout(this);
+        motTextCol.setOrientation(LinearLayout.VERTICAL);
+        motTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView motTitle = new TextView(this);
+        motTitle.setText(t("Movimiento del fondo", "Default Wallpaper Motion"));
+        motTitle.setTypeface(P5Theme.condensedBold());
+        motTitle.setTextSize(15.5f);
+        motTitle.setTextColor(P5Theme.PAPER_WHITE);
+        motTextCol.addView(motTitle);
+        TextView motDesc = new TextView(this);
+        motDesc.setText(t("Estático ahorra batería; Animado activa cintas y giroscopio",
+                "Static freezes the default backdrop; Animated enables ribbons & gyro"));
+        motDesc.setTypeface(P5Theme.bodyRegular());
+        motDesc.setTextSize(11.5f);
+        motDesc.setTextColor(P5Theme.MUTED_TEXT);
+        motTextCol.addView(motDesc);
+        motRow.addView(motTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] motLabels = new String[] {
+            t("ESTÁTICO", "STATIC"), t("ANIMADO", "ANIMATED")
         };
-        wpDimSeg = new P5Views.SegmentedControl(this, dimLabels, wallpaperDim(), false,
+        wpMotionSeg = new P5Views.SegmentedControl(this, motLabels, animatedDefaultWallpaper() ? 1 : 0, true,
                 new P5Views.SegmentedControl.OnPickListener() {
                     @Override
-                    public void onPick(int index) { setWallpaperDim(index); }
+                    public void onPick(int index) { setAnimatedDefaultWallpaper(index == 1); }
                 });
-        dimRow.addView(wpDimSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
-        wpDimRow = dimRow;
-        LinearLayout.LayoutParams dimLp = new LinearLayout.LayoutParams(
+        motRow.addView(wpMotionSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        wpMotionRow = motRow;
+        LinearLayout.LayoutParams motLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        dimLp.bottomMargin = dp(6);
-        list.addView(dimRow, dimLp);
+        motLp.bottomMargin = dp(6);
+        list.addView(motRow, motLp);
 
         // Default Wallpaper Halftone Style (active when Default Wallpaper is shown)
         P5Views.AngledRowLayout htRow = new P5Views.AngledRowLayout(this);
@@ -1216,6 +1290,71 @@ public class Launcher extends Activity {
         htLp.bottomMargin = dp(6);
         list.addView(htRow, htLp);
 
+        // Wallpaper Dim control (active when a custom wallpaper image is applied)
+        P5Views.AngledRowLayout dimRow = new P5Views.AngledRowLayout(this);
+        LinearLayout dimTextCol = new LinearLayout(this);
+        dimTextCol.setOrientation(LinearLayout.VERTICAL);
+        dimTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView dimTitle = new TextView(this);
+        dimTitle.setText(t("Oscurecer fondo personalizado", "Wallpaper Dim"));
+        dimTitle.setTypeface(P5Theme.condensedBold());
+        dimTitle.setTextSize(15.5f);
+        dimTitle.setTextColor(P5Theme.PAPER_WHITE);
+        dimTextCol.addView(dimTitle);
+        TextView dimDesc = new TextView(this);
+        dimDesc.setText(t("Ajusta el contraste sobre tu imagen de fondo",
+                "Controls overlay darkness over your custom wallpaper"));
+        dimDesc.setTypeface(P5Theme.bodyRegular());
+        dimDesc.setTextSize(11.5f);
+        dimDesc.setTextColor(P5Theme.MUTED_TEXT);
+        dimTextCol.addView(dimDesc);
+        dimRow.addView(dimTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] dimLabels = new String[] {
+            t("SUAVE", "LIGHT"), t("MEDIO", "MED"), t("OSCURO", "DARK")
+        };
+        wpDimSeg = new P5Views.SegmentedControl(this, dimLabels, wallpaperDim(), false,
+                new P5Views.SegmentedControl.OnPickListener() {
+                    @Override
+                    public void onPick(int index) { setWallpaperDim(index); }
+                });
+        dimRow.addView(wpDimSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        wpDimRow = dimRow;
+        LinearLayout.LayoutParams dimLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        dimLp.bottomMargin = dp(6);
+        list.addView(dimRow, dimLp);
+
+        // Launcher UI Sound Effects toggle
+        P5Views.AngledRowLayout sfxRow = new P5Views.AngledRowLayout(this);
+        LinearLayout sfxTextCol = new LinearLayout(this);
+        sfxTextCol.setOrientation(LinearLayout.VERTICAL);
+        sfxTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView sfxTitle = new TextView(this);
+        sfxTitle.setText(t("Sonidos del lanzador", "Launcher Sound Effects"));
+        sfxTitle.setTypeface(P5Theme.condensedBold());
+        sfxTitle.setTextSize(15.5f);
+        sfxTitle.setTextColor(P5Theme.PAPER_WHITE);
+        sfxTextCol.addView(sfxTitle);
+        TextView sfxDesc = new TextView(this);
+        sfxDesc.setText(t("Efectos de clic y cambio de pestaña estilo P5",
+                "P5-style UI clicks, tab swishes, and launch slash audio"));
+        sfxDesc.setTypeface(P5Theme.bodyRegular());
+        sfxDesc.setTextSize(11.5f);
+        sfxDesc.setTextColor(P5Theme.MUTED_TEXT);
+        sfxTextCol.addView(sfxDesc);
+        sfxRow.addView(sfxTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] sfxLabels = new String[] { t("NO", "OFF"), t("SÍ", "ON") };
+        sfxSeg = new P5Views.SegmentedControl(this, sfxLabels, launcherSfxEnabled() ? 1 : 0, true,
+                new P5Views.SegmentedControl.OnPickListener() {
+                    @Override
+                    public void onPick(int index) { setLauncherSfxEnabled(index == 1); }
+                });
+        sfxRow.addView(sfxSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        LinearLayout.LayoutParams sfxLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        sfxLp.bottomMargin = dp(6);
+        list.addView(sfxRow, sfxLp);
+
         addActionRow(list,
                 t("Acceso directo con icono propio", "Custom Home Shortcut Icon"),
                 t("Crea un acceso directo en tu pantalla de inicio con tu imagen",
@@ -1225,6 +1364,8 @@ public class Launcher extends Activity {
                     @Override
                     public void onClick(View v) { pick(PICK_ICON, "image/*", false); }
                 }, null, null, false);
+
+        addGroupHeader(list, t("DIAGNÓSTICO", "DIAGNOSTICS"), true);
 
         addActionRow(list,
                 t("Registros de depuración", "Debug Logs"),
@@ -1359,8 +1500,8 @@ public class Launcher extends Activity {
     private void selectTab(int idx, boolean animate) {
         if (animate && idx == activeTab) return;
         activeTab = idx;
-        if (animate && foregroundRoot != null) {
-            foregroundRoot.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        if (animate) {
+            P5Feedback.tab(this);
         }
         for (int i = 0; i < TAB_COUNT; i++) {
             navTabs[i].setActive(i == idx, animate);
@@ -1461,6 +1602,7 @@ public class Launcher extends Activity {
     private void launchGameWithSlash() {
         if (launchingGame) return;
         launchingGame = true;
+        P5Feedback.confirm(this);
         save();
         if (rootFrame == null) {
             startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
@@ -1541,6 +1683,8 @@ public class Launcher extends Activity {
         boolean uwOn = uw != null && "1".equals(uw.values[uw.pick]);
         Option stretchOpt = findOption("NX_STRETCH");
         if (uwOn && stretchOpt != null) stretchOpt.pick = 0;
+        Option touchShow = findOption("NX_TOUCH_SHOW");
+        boolean touchOn = touchShow == null || "1".equals(touchShow.values[touchShow.pick]);
 
         for (Option o : options) {
             if (o.segView != null) o.segView.setSelectedIndex(o.pick);
@@ -1550,6 +1694,11 @@ public class Launcher extends Activity {
             if ("NX_MALI_LOW_SHADOWS".equals(o.key)) enabled = shadowsOn;
             else if ("NX_UW_STRETCH_UI".equals(o.key)) enabled = uwOn;
             else if ("NX_STRETCH".equals(o.key)) enabled = !uwOn;
+            else if ("NX_TOUCH_HIDE".equals(o.key)
+                    || "NX_TOUCH_SIZE".equals(o.key)
+                    || "NX_TOUCH_OPACITY".equals(o.key)
+                    || "NX_STICK_SENSITIVITY".equals(o.key)
+                    || "NX_CAMERA_SENSITIVITY".equals(o.key)) enabled = touchOn;
 
             if (o.rowView != null) {
                 float alpha = enabled ? 1.0f : 0.36f;

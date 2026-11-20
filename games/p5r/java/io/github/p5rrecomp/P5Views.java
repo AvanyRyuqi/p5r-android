@@ -339,7 +339,7 @@ final class P5Views {
                 pressed = true;
                 setScaleX(0.96f);
                 setScaleY(0.96f);
-                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                if (!heroSheenEnabled) P5Feedback.click(getContext());
                 invalidate();
             } else if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
                 pressed = false;
@@ -514,13 +514,13 @@ final class P5Views {
                     idx = Math.max(0, Math.min(labels.length - 1, idx));
                     if (idx != selected) {
                         selected = idx;
-                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                        P5Feedback.tick(getContext());
                         invalidate();
                         if (listener != null) listener.onPick(idx);
                     } else if (labels.length == 2) {
                         // Tapping the already-active side of a 2-option toggle flips it cleanly
                         selected = 1 - selected;
-                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                        P5Feedback.tick(getContext());
                         invalidate();
                         if (listener != null) listener.onPick(selected);
                     }
@@ -632,7 +632,6 @@ final class P5Views {
                 pressed = true;
                 setScaleX(0.95f);
                 setScaleY(0.95f);
-                performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                 invalidate();
             } else if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
                 pressed = false;
@@ -687,6 +686,55 @@ final class P5Views {
             x += textPaint.measureText(key) + 5 * d;
             textPaint.setColor(pressed ? P5Theme.PAPER_WHITE : (accent ? P5Theme.INK_BLACK : P5Theme.PAPER_WHITE));
             c.drawText(value, x, base, textPaint);
+        }
+    }
+
+    // ---- 6b. Compact P5 Category Group Sub-Header ----
+
+    static final class GroupSubHeaderView extends View {
+        private final String label;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path tickPoly = new Path();
+
+        GroupSubHeaderView(Context context, String label) {
+            super(context);
+            this.label = label == null ? "" : label.toUpperCase(java.util.Locale.ROOT);
+            textPaint.setTypeface(P5Theme.monoBold());
+            textPaint.setTextAlign(Paint.Align.LEFT);
+        }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            setMeasuredDimension(MeasureSpec.getSize(wSpec), P5Theme.dpx(getContext(), 22));
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = P5Theme.dp(getContext(), 1f);
+            float w = getWidth(), h = getHeight();
+            float cy = h * 0.56f;
+
+            // Slanted crimson tick mark
+            P5Theme.setSlantedQuad(tickPoly, 2f * d, cy - 5f * d, 8.5f * d, cy + 5f * d, 2.5f * d, 2.5f * d);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(P5Theme.P5_RED);
+            c.drawPath(tickPoly, paint);
+
+            // Uppercase group label
+            textPaint.setTextSize(10.5f * d);
+            textPaint.setColor(Color.argb(215, 246, 245, 240));
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float base = cy - (fm.ascent + fm.descent) * 0.5f;
+            float tx = 14f * d;
+            c.drawText(label, tx, base, textPaint);
+
+            // Subtle hairline rule extending to the right
+            float ruleStart = tx + textPaint.measureText(label) + 8f * d;
+            if (ruleStart < w - 8f * d) {
+                paint.setColor(Color.argb(72, 246, 245, 240));
+                c.drawRect(ruleStart, cy - 0.6f * d, w - 4f * d, cy + 0.6f * d, paint);
+            }
         }
     }
 
@@ -1116,7 +1164,10 @@ final class P5Views {
             lp.rightMargin = P5Theme.dpx(ctx, 8);
             neg.setOnClickListener(new View.OnClickListener() {
                 @Override
-                public void onClick(View v) { dlg.dismiss(); }
+                public void onClick(View v) {
+                    P5Feedback.cancel(ctx);
+                    dlg.dismiss();
+                }
             });
             actions.addView(neg, lp);
         }
