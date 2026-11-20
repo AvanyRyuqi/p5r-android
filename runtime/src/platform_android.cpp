@@ -1413,6 +1413,8 @@ extern "C" void android_main(android_app* app) {
         unsetenv("NX_MAX_ANISO");
         unsetenv("NX_LOD_BIAS");
         unsetenv("NX_CAS");
+        unsetenv("NX_CAS_STRENGTH");
+        unsetenv("NX_FSR_SHARP");
         unsetenv("NX_FXAA");
         unsetenv("NX_COLOR_PROFILE");
         std::ifstream f(g_root + "/config.txt");

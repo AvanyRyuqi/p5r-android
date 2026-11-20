@@ -571,25 +571,33 @@ void vertex_read_barrier(VkCommandBuffer cb, const ShaderInfo* vs) {
 
 }  // namespace
 
+namespace {
+std::atomic<bool> g_draw_cfg_init{false};
+std::atomic<bool> g_shadows_off{false};
+std::atomic<bool> g_bloom_disabled{false};
+}  // namespace
+
+void draw_refresh_config() {
+    const char* se = std::getenv("NX_SHADOWS");
+    g_shadows_off.store(se && se[0] == '0', std::memory_order_relaxed);
+    const char* be = std::getenv("NX_DISABLE_BLOOM");
+    g_bloom_disabled.store(be && (be[0] == '1' || std::strcmp(be, "true") == 0), std::memory_order_relaxed);
+    g_draw_cfg_init.store(true, std::memory_order_release);
+}
+
 // NX_SHADOWS=0 (the launcher's "Sombras: desactivadas"): no draws into shadow maps, the square depth-only targets of
 // 512 or more (P5R: 2048 and 1024, D32). Their clears stay: the maps say "lit" everywhere.
 bool shadow_draw_skipped(const Targets& t) {
-    static const bool s_shadows_off = [] {
-        const char* e = std::getenv("NX_SHADOWS");
-        return e && e[0] == '0';
-    }();
-    if (!s_shadows_off || !depth_only(t)) return false;
+    if (!g_draw_cfg_init.load(std::memory_order_acquire)) draw_refresh_config();
+    if (!g_shadows_off.load(std::memory_order_relaxed) || !depth_only(t)) return false;
     const GpuImage* d = image_of(t.depth);
     return d && d->width == d->height && (d->width >= 256 || d->shadow) && !(d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
 }
 
 // NX_DISABLE_BLOOM=1 (the launcher's "Post-procesado: desactivado"): no draws into bloom/blur mip chains.
 bool bloom_disabled_env() {
-    static const bool s_bloom_disabled = [] {
-        const char* e = std::getenv("NX_DISABLE_BLOOM");
-        return e && (e[0] == '1' || std::strcmp(e, "true") == 0);
-    }();
-    return s_bloom_disabled;
+    if (!g_draw_cfg_init.load(std::memory_order_acquire)) draw_refresh_config();
+    return g_bloom_disabled.load(std::memory_order_relaxed);
 }
 
 bool bloom_draw_skipped(const Targets& t) {

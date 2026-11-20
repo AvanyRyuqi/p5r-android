@@ -1,5 +1,5 @@
 #version 450
-// Lightweight Mobile FXAA Console (5-tap with flat-pixel early exit) + optional zero-extra-tap CAS + color grade.
+// Lightweight Mobile FXAA Console (5-tap with flat-pixel early exit) + optional zero-extra-tap CAS + Vivid / P5 Pop grade.
 // Smooths 3D stair-stepping on Mali-G57 without smearing anime linework or UI text.
 layout(set = 0, binding = 0) uniform sampler2D src;
 layout(push_constant) uniform P {
@@ -7,7 +7,7 @@ layout(push_constant) uniform P {
     vec4 off;   // xy: rot offset; z: sharpness; w: target width / height (upright)
     vec4 box;   // x0 y0 w h
     vec4 crop;  // u0 v0 du dv
-    vec4 post;  // x: CAS strength (0..1), y: vibrance, z: contrast, w: reserved
+    vec4 post;  // x: CAS strength (0..1), y: vibrance, z: contrast, w: style (0 = vivid, 1 = p5 pop)
 } p;
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
@@ -16,7 +16,24 @@ float luma(vec3 rgb) {
     return dot(rgb, vec3(0.299, 0.587, 0.114));
 }
 
-vec3 apply_color(vec3 c, float vib, float con) {
+vec3 apply_color(vec3 c, float vib, float con, float style) {
+    if (style > 0.5) {
+        c = max(c - vec3(0.028), vec3(0.0)) / 0.972;
+        vec3 s = c * c * (3.0 - 2.0 * c);
+        c = mix(c, s, con);
+        float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float shadowW = clamp(1.0 - l * 2.2, 0.0, 1.0);
+        c += vec3(-0.015, -0.005, 0.028) * shadowW;
+        float redDom = clamp((c.r - max(c.g, c.b)) * 2.2, 0.0, 1.0);
+        float goldDom = clamp((min(c.r, c.g) - c.b) * 1.8, 0.0, 1.0);
+        float mx = max(c.r, max(c.g, c.b));
+        float mn = min(c.r, min(c.g, c.b));
+        float sat = mx - mn;
+        c = mix(vec3(l), c, 1.0 + vib * (1.0 - sat * 0.45));
+        c.r += redDom * 0.09;
+        c.rg += vec2(0.04, 0.025) * goldDom;
+        return clamp(c, 0.0, 1.0);
+    }
     if (vib > 0.001) {
         float mx = max(c.r, max(c.g, c.b));
         float mn = min(c.r, min(c.g, c.b));
@@ -89,7 +106,7 @@ void main() {
         outC = clamp(((rgbNW + rgbNE + rgbSW + rgbSE) * w + outC) / (1.0 + 4.0 * w), 0.0, 1.0);
     }
 
-    if (p.post.y > 0.001 || p.post.z > 0.001)
-        outC = apply_color(outC, p.post.y, p.post.z);
+    if (p.post.y > 0.001 || p.post.z > 0.001 || p.post.w > 0.5)
+        outC = apply_color(outC, p.post.y, p.post.z, p.post.w);
     color = vec4(outC, 1.0);
 }

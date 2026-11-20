@@ -15,7 +15,24 @@ layout(push_constant) uniform P {
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 
-vec3 apply_color(vec3 c, float vib, float con) {
+vec3 apply_color(vec3 c, float vib, float con, float style) {
+    if (style > 0.5) {
+        c = max(c - vec3(0.028), vec3(0.0)) / 0.972;
+        vec3 s = c * c * (3.0 - 2.0 * c);
+        c = mix(c, s, con);
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float shadowW = clamp(1.0 - luma * 2.2, 0.0, 1.0);
+        c += vec3(-0.015, -0.005, 0.028) * shadowW;
+        float redDom = clamp((c.r - max(c.g, c.b)) * 2.2, 0.0, 1.0);
+        float goldDom = clamp((min(c.r, c.g) - c.b) * 1.8, 0.0, 1.0);
+        float mx = max(c.r, max(c.g, c.b));
+        float mn = min(c.r, min(c.g, c.b));
+        float sat = mx - mn;
+        c = mix(vec3(luma), c, 1.0 + vib * (1.0 - sat * 0.45));
+        c.r += redDom * 0.09;
+        c.rg += vec2(0.04, 0.025) * goldDom;
+        return clamp(c, 0.0, 1.0);
+    }
     if (vib > 0.001) {
         float mx = max(c.r, max(c.g, c.b));
         float mn = min(c.r, min(c.g, c.b));
@@ -106,8 +123,8 @@ void main() {
         vec2 afp = abs(fp);
         vec3 base = mix(mix(sC, sHx, afp.x), mix(sVy, sQ, afp.x), afp.y);
         vec3 res = clamp(base + delta * 0.5, minQ, maxQ);
-        if (p.post.y > 0.001 || p.post.z > 0.001)
-            res = apply_color(res, p.post.y, p.post.z);
+        if (p.post.y > 0.001 || p.post.z > 0.001 || p.post.w > 0.5)
+            res = apply_color(res, p.post.y, p.post.z, p.post.w);
         color = vec4(res, 1.0);
         return;
     }
@@ -136,7 +153,7 @@ void main() {
 
     vec3 upscaled = clamp(aC / max(aW, 1e-4), minQ, maxQ);
     vec3 res = clamp(upscaled + delta * 0.5, max(vec3(0.0), minQ - 0.06), min(vec3(1.0), maxQ + 0.06));
-    if (p.post.y > 0.001 || p.post.z > 0.001)
-        res = apply_color(res, p.post.y, p.post.z);
+    if (p.post.y > 0.001 || p.post.z > 0.001 || p.post.w > 0.5)
+        res = apply_color(res, p.post.y, p.post.z, p.post.w);
     color = vec4(res, 1.0);
 }

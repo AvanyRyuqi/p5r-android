@@ -21,6 +21,9 @@ namespace nx::nvn {
 
 using namespace nx::vk;
 
+void sampler_refresh_config();  // nvn_sampler.cpp
+void draw_refresh_config();     // nvn_draw.cpp
+
 namespace {
 
 // glslc -O --target-env=vulkan1.0 of present.vert:
@@ -128,6 +131,7 @@ struct Pass {
     bool cfg_fsr = false;
     bool cfg_cas = false;
     bool cfg_fxaa = false;
+    bool cfg_show_fps = false;
     int cfg_color = 0;
     float cfg_cas_strength = 0.72f;
     float cfg_fsr_sharp = 0.2f;
@@ -178,11 +182,15 @@ void refresh_present_config() {
     g.cfg_fsr = read_fsr_env();
     g.cfg_cas = read_cas_env();
     g.cfg_fxaa = read_fxaa_env();
+    const char* fps_e = std::getenv("NX_SHOW_FPS");
+    g.cfg_show_fps = fps_e && fps_e[0] == '1';
     g.cfg_color = read_color_profile_env();
     g.cfg_cas_strength = read_cas_strength_env();
     g.cfg_fsr_sharp = read_fsr_sharpness_env();
     g.fsr_logged = false;
     g.enhance_logged = false;
+    sampler_refresh_config();
+    draw_refresh_config();
 }
 
 bool fsr_on() { return g.cfg_fsr; }
@@ -444,11 +452,7 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     plat::OverlayShape shapes[kOverlayMax];
     size_t count = plat::touch_overlay(shapes, kOverlayMax);
     // NX_SHOW_FPS=1 (the launcher's FPS counter, off by default): presents over the last second, top left.
-    static const bool show_fps = [] {
-        const char* e = std::getenv("NX_SHOW_FPS");
-        return e && e[0] == '1';
-    }();
-    if (show_fps && count < kOverlayMax) {
+    if (g.cfg_show_fps && count < kOverlayMax) {
         static uint64_t t0 = plat::monotonic_ns(), frames = 0;
         static uint32_t fps = 0;
         uint64_t now = plat::monotonic_ns();
@@ -481,9 +485,9 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     const int cprof = color_profile();
     p.off[2] = std::exp2(-fsr_sharpness());
     p.post[0] = cas_on() ? cas_strength() : 0.0f;
-    p.post[1] = (cprof == 2) ? 0.68f : (cprof == 1 ? 0.42f : 0.0f);
-    p.post[2] = (cprof == 2) ? 0.38f : (cprof == 1 ? 0.22f : 0.0f);
-    p.post[3] = 0.0f;
+    p.post[1] = (cprof == 2) ? 0.55f : (cprof == 1 ? 0.40f : 0.0f);
+    p.post[2] = (cprof == 2) ? 0.42f : (cprof == 1 ? 0.20f : 0.0f);
+    p.post[3] = (cprof == 2) ? 1.0f : 0.0f;
     if (use_fsr && !g.fsr_logged) {
         log("nvn/vk: FSR 1 (single-pass mobile): %.0fx%.0f -> %ux%u (sharpness %.2f stops, color=%d)",
             cw, ch, out_w, out_h, fsr_sharpness(), cprof);
