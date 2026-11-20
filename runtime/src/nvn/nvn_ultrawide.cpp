@@ -1,6 +1,7 @@
 #include "nvn_ultrawide.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -136,8 +137,15 @@ void uw_scan(uint64_t present) {
 //   - Mario Wonder's {1000.0, 0.785398, 16/9} camera pool
 // Setting the 16/9 aspect float to k * 16/9 gives a true Hor+ camera (same vertical FOV, wider horizontal FOV + frustum).
 namespace {
+struct CamSlot {
+    uint64_t addr = 0;
+    uint32_t near_bits = 0;
+    uint32_t far_bits = 0;
+    uint32_t patch_count = 0;
+};
 std::mutex g_cam_lock;
-std::vector<uint64_t> g_cams;  // addresses of the aspect floats
+std::vector<CamSlot> g_cams;  // tracked camera aspect float addresses + header signatures
+std::atomic<uint64_t> g_uw_last_present{0};
 
 inline float bits_to_f32(uint32_t u) {
     float f;
@@ -154,7 +162,15 @@ inline bool is_p5r_gfd_cam(const uint32_t* w) {
     if (near_z < 0.05f || near_z > 100.0f) return false;
     if (far_z < 200.0f || far_z > 10000000.0f || far_z <= near_z * 10.0f) return false;
     if (fov_deg < 1.0f || fov_deg > 150.0f) return false;
-    return w[2] == 1u || w[5] == 1u;
+    // Verified P5R GFD camera header tail: w[1] == 0, w[2] <= 1, w[5] == 1.
+    return w[1] == 0u && w[2] <= 1u && w[5] == 1u;
+}
+
+void cam_add_locked(uint64_t a, uint32_t near_b, uint32_t far_b) {
+    if (g_cams.size() >= 8192) return;
+    for (const CamSlot& s : g_cams)
+        if (s.addr == a) return;
+    g_cams.push_back({a, near_b, far_b, 0});
 }
 
 void cam_scan_bss() {
@@ -164,7 +180,7 @@ void cam_scan_bss() {
     const uint64_t lo = mi->base + mi->data;
     const uint64_t hi = mi->base + mi->bss + mi->bss_size;
     constexpr uint32_t asp_bits = 0x3fe38e39u;
-    std::vector<uint64_t> found;
+    std::vector<CamSlot> found;
     for (uint64_t a = lo + 12; a + 12 <= hi; a += 4) {
         const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
         if (w[0] != asp_bits) continue;
@@ -177,11 +193,10 @@ void cam_scan_bss() {
                             near_z >= 0.05f && near_z <= 100.0f &&
                             far_z >= 200.0f && far_z <= 10000000.0f && far_z > near_z * 10.0f &&
                             fov_deg >= 1.0f && fov_deg <= 150.0f;
-        if (is_cam) found.push_back(a);
+        if (is_cam) found.push_back({a, w[-3], w[-2], 0});
     }
     std::lock_guard lk(g_cam_lock);
-    for (uint64_t a : found)
-        if (std::find(g_cams.begin(), g_cams.end(), a) == g_cams.end() && g_cams.size() < 8192) g_cams.push_back(a);
+    for (const CamSlot& s : found) cam_add_locked(s.addr, s.near_bits, s.far_bits);
 }
 
 void cam_scan() {
@@ -189,10 +204,11 @@ void cam_scan() {
     const uint64_t lo = (kHeapBase + 16) & ~7ull;
     const uint64_t hi = (kHeapBase + heap_size() - 24) & ~7ull;
     if (lo >= hi) return;
-    std::vector<uint64_t> found;
+    std::vector<CamSlot> found;
     auto check_addr = [&](uint64_t a) {
         const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
-        if ((w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w)) found.push_back(a);
+        if ((w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w))
+            found.push_back({a, w[-3], w[-2], 0});
     };
     for (uint64_t a = lo; a < hi; a += 8) {
         const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
@@ -200,13 +216,13 @@ void cam_scan() {
         if (uint32_t(v >> 32) == asp_bits) check_addr(a + 4);
     }
     std::lock_guard lk(g_cam_lock);
-    for (uint64_t a : found)
-        if (std::find(g_cams.begin(), g_cams.end(), a) == g_cams.end() && g_cams.size() < 8192) g_cams.push_back(a);
+    for (const CamSlot& s : found) cam_add_locked(s.addr, s.near_bits, s.far_bits);
 }
 }  // namespace
 
 void uw_cameras(uint64_t present) {
     if (!uw_on()) return;
+    g_uw_last_present.store(present, std::memory_order_relaxed);
     static const bool off = std::getenv("NX_UW_CAMERA") && std::getenv("NX_UW_CAMERA")[0] == '0';
     if (off) return;
     static const bool bss_on = !(std::getenv("NX_UW_CAM_BSS") && std::getenv("NX_UW_CAM_BSS")[0] == '0');
@@ -223,6 +239,14 @@ void uw_cameras(uint64_t present) {
             plat::set_thread_priority(10);
             int scans = 0;
             for (;;) {
+                // Skip heap scanning while P5R is stalled or mid-area transition (< 4 presents in 250 ms).
+                const uint64_t p0 = g_uw_last_present.load(std::memory_order_relaxed);
+                plat::sleep_ns(250'000'000ll);
+                const uint64_t p1 = g_uw_last_present.load(std::memory_order_relaxed);
+                if (p1 - p0 < 4) {
+                    plat::sleep_ns(750'000'000ll);
+                    continue;
+                }
                 uint64_t t0 = plat::monotonic_ns();
                 cam_scan();
                 size_t count = 0;
@@ -244,25 +268,35 @@ void uw_cameras(uint64_t present) {
     uint32_t wide_bits;
     std::memcpy(&wide_bits, &wide, 4);
     static std::set<uint64_t> logged;
+    static int repatch_logged = 0;
     std::lock_guard lk(g_cam_lock);
     for (auto it = g_cams.begin(); it != g_cams.end();) {
-        const uint64_t a = *it;
+        const uint64_t a = it->addr;
         auto* p = reinterpret_cast<volatile uint32_t*>(a);
         const uint32_t cur = *p;
         if (cur == asp_bits) {
             const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
-            const bool valid = (w[-2] == far_bits && w[-1] == fov_bits) || is_p5r_gfd_cam(w) ||
-                               (a < kHeapBase);
+            const bool is_heap = a >= kHeapBase;
+            const bool sig_ok = !is_heap || it->patch_count == 0 ||
+                                (w[-3] == it->near_bits && w[-2] == it->far_bits);
+            const bool valid = sig_ok && ((w[-2] == far_bits && w[-1] == fov_bits) ||
+                                          is_p5r_gfd_cam(w) || !is_heap);
             if (valid) {
                 if (logged.size() < 64 && logged.insert(a).second) {
                     log("nvn: ultrawide: patch %s %llx (main+%llx) near=%g far=%g fov=%g w1=%x w2=%x w5=%x",
-                        a < kHeapBase ? "bss" : "heap", (unsigned long long)a,
+                        is_heap ? "heap" : "bss", (unsigned long long)a,
                         (unsigned long long)(a - kModuleBase), double(bits_to_f32(w[-3])),
                         double(bits_to_f32(w[-2])), double(bits_to_f32(w[-1])), w[1], w[2], w[5]);
+                } else if (it->patch_count > 0 && repatch_logged++ < 16) {
+                    log("nvn: ultrawide: re-patch %s %llx at present %llu (near=%g far=%g fov=%g)",
+                        is_heap ? "heap" : "bss", (unsigned long long)a, (unsigned long long)present,
+                        double(bits_to_f32(w[-3])), double(bits_to_f32(w[-2])), double(bits_to_f32(w[-1])));
                 }
                 uint32_t expected = asp_bits;
-                __atomic_compare_exchange_n(reinterpret_cast<uint32_t*>(a), &expected, wide_bits, false,
-                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+                if (__atomic_compare_exchange_n(reinterpret_cast<uint32_t*>(a), &expected, wide_bits, false,
+                                                __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                    it->patch_count++;
+                }
                 ++it;
             } else {
                 it = g_cams.erase(it);
