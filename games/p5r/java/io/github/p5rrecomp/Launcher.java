@@ -2857,13 +2857,16 @@ public class Launcher extends Activity {
                 sb.append("(none)\n");
             }
 
-            appendCappedFile(sb, "nx_crash.log", new File(dataDir(), "nx_crash.log"), 500, 1000);
-            appendCappedFile(sb, "nx.log", new File(dataDir(), "nx.log"), 250, 2500);
-            appendCappedFile(sb, "nx.log.prev", new File(dataDir(), "nx.log.prev"), 250, 2500);
+            appendCappedFile(sb, "nx_crash.log", new File(dataDir(), "nx_crash.log"), 300, 300);
+            appendCappedFile(sb, "nx.log", new File(dataDir(), "nx.log"), 120, 500);
+            appendCappedFile(sb, "nx.log.prev", new File(dataDir(), "nx.log.prev"), 80, 300);
 
-            sb.append("\n=== logcat (last 1500 lines) ===\n");
+            sb.append("\n=== logcat (filtered, last 400 lines) ===\n");
             try {
-                Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-t", "1500"});
+                Process p = Runtime.getRuntime().exec(new String[] {
+                        "logcat", "-d", "-t", "400", "-s",
+                        "p5r:V", "AndroidRuntime:E", "DEBUG:V", "libc:F", "vulkan:W", "*:E"
+                });
                 try (BufferedReader br = new BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
                     String line;
                     while ((line = br.readLine()) != null) sb.append(line).append("\n");
