@@ -130,6 +130,7 @@ public class Launcher extends Activity {
     private View wpHalftoneRow;
     private P5Views.SegmentedControl wpHalftoneSeg;
     private P5Views.SegmentedControl sfxSeg;
+    private P5Views.SegmentedControl hapticsSeg;
 
     private Bitmap currentWallpaperBmp;
     private boolean hasPausedOnce = false;
@@ -377,6 +378,15 @@ public class Launcher extends Activity {
         P5Feedback.setSfxEnabled(enabled);
     }
 
+    boolean launcherHapticsEnabled() {
+        return prefs().getBoolean("launcher_haptics", true);
+    }
+
+    void setLauncherHapticsEnabled(boolean enabled) {
+        prefs().edit().putBoolean("launcher_haptics", enabled).apply();
+        P5Feedback.setHapticsEnabled(enabled);
+    }
+
     void loadWallpaper() {
         if (bgView != null) {
             bgView.setWallpaperDim(wallpaperDim());
@@ -478,6 +488,9 @@ public class Launcher extends Activity {
         if (sfxSeg != null) {
             sfxSeg.setSelectedIndex(launcherSfxEnabled() ? 1 : 0);
         }
+        if (hapticsSeg != null) {
+            hapticsSeg.setSelectedIndex(launcherHapticsEnabled() ? 1 : 0);
+        }
     }
 
     // ---- data validation ----
@@ -526,6 +539,7 @@ public class Launcher extends Activity {
         hideSystemBars();
         P5Feedback.init(this);
         P5Feedback.setSfxEnabled(launcherSfxEnabled());
+        P5Feedback.setHapticsEnabled(launcherHapticsEnabled());
         initOptions();
         boolean playIntro = (state == null);
         buildUi(playIntro);
@@ -636,6 +650,13 @@ public class Launcher extends Activity {
                 new String[] {"off", "cas", "fsr"},
                 new String[] {"NO", "CAS", "FSR 1.0"},
                 new String[] {"OFF", "CAS", "FSR 1.0"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "SHARPEN_STRENGTH",
+                "Intensidad de nitidez", "Sharpening Strength",
+                "Ajusta la fuerza de CAS o FSR 1.0 cuando está activo",
+                "Tunes CAS or FSR 1.0 sharpening intensity when enabled",
+                new String[] {"subtle", "med", "strong"},
+                new String[] {"SUAVE", "MEDIO", "FUERTE"},
+                new String[] {"SUBTLE", "MED", "STRONG"}, 1, false));
         options.add(new Option(TAB_DISPLAY, "NX_FXAA",
                 "Suavizado de bordes (FXAA)", "Anti-Aliasing (FXAA)",
                 "Suaviza los dientes de sierra 3D con bajo coste en GPU",
@@ -1378,6 +1399,37 @@ public class Launcher extends Activity {
         sfxLp.bottomMargin = dp(6);
         list.addView(sfxRow, sfxLp);
 
+        // Launcher Haptics toggle
+        P5Views.AngledRowLayout hapRow = new P5Views.AngledRowLayout(this);
+        LinearLayout hapTextCol = new LinearLayout(this);
+        hapTextCol.setOrientation(LinearLayout.VERTICAL);
+        hapTextCol.setPadding(dp(4), 0, dp(10), 0);
+        TextView hapTitle = new TextView(this);
+        hapTitle.setText(t("Vibración del lanzador", "Launcher Haptics"));
+        hapTitle.setTypeface(P5Theme.condensedBold());
+        hapTitle.setTextSize(15.5f);
+        hapTitle.setTextColor(P5Theme.PAPER_WHITE);
+        hapTextCol.addView(hapTitle);
+        TextView hapDesc = new TextView(this);
+        hapDesc.setText(t("Respuesta táctil al pulsar pestañas y botones",
+                "Tactile vibration feedback on tabs, toggles, and PLAY"));
+        hapDesc.setTypeface(P5Theme.bodyRegular());
+        hapDesc.setTextSize(11.5f);
+        hapDesc.setTextColor(P5Theme.MUTED_TEXT);
+        hapTextCol.addView(hapDesc);
+        hapRow.addView(hapTextCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        String[] hapLabels = new String[] { t("NO", "OFF"), t("SÍ", "ON") };
+        hapticsSeg = new P5Views.SegmentedControl(this, hapLabels, launcherHapticsEnabled() ? 1 : 0, true,
+                new P5Views.SegmentedControl.OnPickListener() {
+                    @Override
+                    public void onPick(int index) { setLauncherHapticsEnabled(index == 1); }
+                });
+        hapRow.addView(hapticsSeg, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)));
+        LinearLayout.LayoutParams hapLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        hapLp.bottomMargin = dp(6);
+        list.addView(hapRow, hapLp);
+
         addActionRow(list,
                 t("Acceso directo con icono propio", "Custom Home Shortcut Icon"),
                 t("Crea un acceso directo en tu pantalla de inicio con tu imagen",
@@ -1716,6 +1768,8 @@ public class Launcher extends Activity {
         if (uwOn && stretchOpt != null) stretchOpt.pick = 0;
         Option touchShow = findOption("NX_TOUCH_SHOW");
         boolean touchOn = touchShow == null || "1".equals(touchShow.values[touchShow.pick]);
+        Option sharpModeOpt = findOption("SHARPEN_MODE");
+        boolean sharpenOn = sharpModeOpt != null && !"off".equals(sharpModeOpt.values[sharpModeOpt.pick]);
 
         for (Option o : options) {
             if (o.segView != null) o.segView.setSelectedIndex(o.pick);
@@ -1723,6 +1777,7 @@ public class Launcher extends Activity {
 
             boolean enabled = true;
             if ("NX_MALI_LOW_SHADOWS".equals(o.key)) enabled = shadowsOn;
+            else if ("SHARPEN_STRENGTH".equals(o.key)) enabled = sharpenOn;
             else if ("NX_UW_STRETCH_UI".equals(o.key)) enabled = uwOn;
             else if ("NX_STRETCH".equals(o.key)) enabled = !uwOn;
             else if ("NX_TOUCH_HIDE".equals(o.key)
@@ -2055,6 +2110,17 @@ public class Launcher extends Activity {
         final String sharpMode = config.get("SHARPEN_MODE");
         config.put("NX_FSR", "fsr".equals(sharpMode) ? "1" : "0");
         config.put("NX_CAS", "cas".equals(sharpMode) ? "1" : "0");
+        final String sharpStr = config.get("SHARPEN_STRENGTH");
+        if ("subtle".equals(sharpStr)) {
+            config.put("NX_CAS_STRENGTH", "0.42");
+            config.put("NX_FSR_SHARP", "0.60");
+        } else if ("strong".equals(sharpStr)) {
+            config.put("NX_CAS_STRENGTH", "1.00");
+            config.put("NX_FSR_SHARP", "0.00");
+        } else {
+            config.put("NX_CAS_STRENGTH", "0.72");
+            config.put("NX_FSR_SHARP", "0.25");
+        }
         if ("1".equals(config.get("NX_ULTRAWIDE"))) config.put("NX_STRETCH", "0");
         final String preset = config.get("GRAPHICS");
         if ("low".equals(preset)) config.put("NX_LOD_BIAS", "1");

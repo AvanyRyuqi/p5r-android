@@ -5,6 +5,7 @@ import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.os.Build;
+import android.os.VibrationAttributes;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -23,6 +24,7 @@ final class P5Feedback {
 
     private static boolean initialized = false;
     private static boolean sfxEnabled = true;
+    private static boolean hapticsEnabled = true;
     private static final AudioTrack[] tracks = new AudioTrack[SFX_COUNT];
     private static Vibrator cachedVibrator;
 
@@ -51,6 +53,14 @@ final class P5Feedback {
         return sfxEnabled;
     }
 
+    static void setHapticsEnabled(boolean enabled) {
+        hapticsEnabled = enabled;
+    }
+
+    static boolean isHapticsEnabled() {
+        return hapticsEnabled;
+    }
+
     static void release() {
         for (int i = 0; i < SFX_COUNT; i++) {
             if (tracks[i] != null) {
@@ -66,31 +76,31 @@ final class P5Feedback {
 
     static void tick(Context ctx) {
         init(ctx);
-        vibrate(14, 115);
+        vibrate(24, 190);
         playSfx(SFX_TICK);
     }
 
     static void click(Context ctx) {
         init(ctx);
-        vibrate(18, 160);
+        vibrate(30, 225);
         playSfx(SFX_TICK);
     }
 
     static void tab(Context ctx) {
         init(ctx);
-        vibrate(18, 155);
+        vibrate(28, 215);
         playSfx(SFX_TAB);
     }
 
     static void confirm(Context ctx) {
         init(ctx);
-        vibrate(28, 220);
+        vibrate(45, 255);
         playSfx(SFX_CONFIRM);
     }
 
     static void cancel(Context ctx) {
         init(ctx);
-        vibrate(14, 105);
+        vibrate(22, 180);
         playSfx(SFX_CANCEL);
     }
 
@@ -109,17 +119,26 @@ final class P5Feedback {
     }
 
     private static void vibrate(long ms, int amplitude) {
+        if (!hapticsEnabled) return;
         Vibrator v = cachedVibrator;
         if (v == null) return;
         try {
             if (!v.hasVibrator()) return;
-            if (Build.VERSION.SDK_INT >= 26) {
-                int amp = v.hasAmplitudeControl() ? amplitude : VibrationEffect.DEFAULT_AMPLITUDE;
-                v.vibrate(VibrationEffect.createOneShot(ms, amp));
+            int amp = v.hasAmplitudeControl() ? amplitude : VibrationEffect.DEFAULT_AMPLITUDE;
+            VibrationEffect eff = VibrationEffect.createOneShot(ms, amp);
+            if (Build.VERSION.SDK_INT >= 33) {
+                // USAGE_MEDIA ensures HyperOS/MIUI does not suppress game UI haptics when system Touch Feedback is off
+                VibrationAttributes attrs = VibrationAttributes.createForUsage(VibrationAttributes.USAGE_MEDIA);
+                v.vibrate(eff, attrs);
             } else {
                 @SuppressWarnings("deprecation")
-                long dur = ms;
-                v.vibrate(dur);
+                AudioAttributes aa = new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build();
+                @SuppressWarnings("deprecation")
+                boolean unused = true;
+                v.vibrate(eff, aa);
             }
         } catch (Throwable ignored) {
         }
