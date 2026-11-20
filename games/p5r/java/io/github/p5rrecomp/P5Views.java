@@ -6,6 +6,7 @@ import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Dialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -13,6 +14,7 @@ import android.graphics.Path;
 import android.graphics.drawable.ColorDrawable;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,12 +25,36 @@ import android.view.animation.LinearInterpolator;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Custom Direction A (Persona 5 Pause / Calling Card) Canvas-drawn UI primitives:
  * sharp hand-cut paper polygons, 0px-blur offset ink shadows, zero rounded corners.
  */
 final class P5Views {
+
+    // Synced with Launcher's NX_GAMEPAD_LAYOUT ("1" = Xbox/PC: A=Confirm, B=Back; "0" = Nintendo: B=Confirm, A=Back)
+    private static boolean sXboxGamepadLayout = false;
+
+    static void setXboxGamepadLayout(boolean xbox) {
+        sXboxGamepadLayout = xbox;
+    }
+
+    static boolean isXboxGamepadLayout() {
+        return sXboxGamepadLayout;
+    }
+
+    static boolean isConfirmKey(int keyCode) {
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
+                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) return true;
+        return sXboxGamepadLayout ? (keyCode == KeyEvent.KEYCODE_BUTTON_A) : (keyCode == KeyEvent.KEYCODE_BUTTON_B);
+    }
+
+    static boolean isBackKey(int keyCode) {
+        if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) return true;
+        return sXboxGamepadLayout ? (keyCode == KeyEvent.KEYCODE_BUTTON_B) : (keyCode == KeyEvent.KEYCODE_BUTTON_A);
+    }
 
     // ---- 1. Ransom-Cut / Calling-Card Masthead ("PERSONA 5" / "ROYAL") ----
 
@@ -148,7 +174,7 @@ final class P5Views {
             this.label = label;
             this.subTag = subTag;
             setClickable(true);
-            setFocusable(true);
+            setFocusable(false);
             textPaint.setTypeface(P5Theme.displayBold());
         }
 
@@ -200,12 +226,12 @@ final class P5Views {
             float padR = 14f * d;
             float padV = 3f * d;
 
-            if (active || isFocused()) {
-                // Jagged crimson + yellow backing slash behind active item
+            if (active) {
+                // Jagged crimson backing slash behind active item
                 P5Theme.setCallingCardQuad(backSlash, 2 * d, padV - 1 * d, w - padR + 5 * d, h - padV + 2 * d,
                         4 * d, -1 * d, 2 * d, 2 * d, -6 * d, 1 * d, -2 * d, -1 * d);
                 paint.setStyle(Paint.Style.FILL);
-                paint.setColor(active ? P5Theme.P5_RED : P5Theme.ACID_YELLOW);
+                paint.setColor(P5Theme.P5_RED);
                 c.drawPath(backSlash, paint);
 
                 // Stark paper-white active polygon
@@ -217,6 +243,22 @@ final class P5Views {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(2f * d);
                 paint.setColor(P5Theme.INK_BLACK);
+                c.drawPath(mainPoly, paint);
+            } else if (isFocused()) {
+                // Dark elevated slab with bold acid-yellow frame + white text (never white-on-white)
+                P5Theme.setSlantedQuad(mainPoly, 4 * d, padV + 1 * d, w - padR - 4 * d, h - padV - 1 * d,
+                        skew * 0.35f, skew * 0.85f);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(225, 28, 26, 36));
+                c.drawPath(mainPoly, paint);
+
+                P5Theme.setSlantedQuad(tickPoly, 4 * d, padV + 1 * d, 11 * d, h - padV - 1 * d, 2 * d, 2 * d);
+                paint.setColor(P5Theme.ACID_YELLOW);
+                c.drawPath(tickPoly, paint);
+
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(2.2f * d);
+                paint.setColor(P5Theme.ACID_YELLOW);
                 c.drawPath(mainPoly, paint);
             } else {
                 // Subtle dark cut slab when idle
@@ -257,6 +299,7 @@ final class P5Views {
         private final boolean primary; // true = massive crimson/white PLAY slab, false = compact action button
         private boolean warningStyle = false;
         private boolean pressed = false;
+        private boolean controllerFocused = false;
         private boolean heroSheenEnabled = false;
         private float sheenPhase = 0f;
         private ValueAnimator sheenAnim;
@@ -274,7 +317,7 @@ final class P5Views {
             this.primary = primary;
             this.fixedHeightDp = heightDp;
             setClickable(true);
-            setFocusable(true);
+            setFocusable(false);
             textPaint.setTypeface(primary ? P5Theme.displayBold() : P5Theme.condensedBold());
             textPaint.setTextAlign(Paint.Align.CENTER);
         }
@@ -290,6 +333,14 @@ final class P5Views {
                 updateSheenAnim();
                 invalidate();
             }
+        }
+
+        void setControllerFocused(boolean f) {
+            if (this.controllerFocused == f) return;
+            this.controllerFocused = f;
+            animate().cancel();
+            animate().scaleX(f ? 1.035f : 1f).scaleY(f ? 1.035f : 1f).setDuration(90).start();
+            invalidate();
         }
 
         void enableHeroSheen(boolean enabled) {
@@ -415,7 +466,7 @@ final class P5Views {
                 txtColor = pressed ? P5Theme.PAPER_WHITE : P5Theme.INK_BLACK;
                 strokeColor = P5Theme.INK_BLACK;
             }
-            if (isFocused()) strokeColor = P5Theme.ACID_YELLOW;
+            if (isFocused() || controllerFocused) strokeColor = P5Theme.ACID_YELLOW;
 
             paint.setColor(fillColor);
             c.drawPath(poly, paint);
@@ -452,7 +503,7 @@ final class P5Views {
 
             // Crisp border
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth((primary ? 2.8f : 1.8f) * d);
+            paint.setStrokeWidth(((isFocused() || controllerFocused) ? 3.2f : (primary ? 2.8f : 1.8f)) * d);
             paint.setColor(strokeColor);
             c.drawPath(poly, paint);
 
@@ -476,6 +527,7 @@ final class P5Views {
         private String[] labels;
         private int selected = 0;
         private final boolean offOnToggle;
+        private boolean controllerFocused = false;
         private OnPickListener listener;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -488,7 +540,7 @@ final class P5Views {
             this.offOnToggle = offOnToggle;
             this.listener = listener;
             setClickable(true);
-            setFocusable(true);
+            setFocusable(false);
             textPaint.setTypeface(P5Theme.condensedBold());
             textPaint.setTextAlign(Paint.Align.CENTER);
         }
@@ -497,6 +549,36 @@ final class P5Views {
             this.labels = labels;
             this.selected = pick;
             invalidate();
+        }
+
+        void setControllerFocused(boolean f) {
+            if (this.controllerFocused == f) return;
+            this.controllerFocused = f;
+            invalidate();
+        }
+
+        boolean step(int delta) {
+            if (!isEnabled() || labels.length <= 1) return false;
+            int next;
+            if (labels.length == 2) {
+                next = (selected + 1) % 2;
+            } else {
+                next = Math.max(0, Math.min(labels.length - 1, selected + delta));
+                if (next == selected) return false;
+            }
+            selected = next;
+            P5Feedback.click(getContext());
+            invalidate();
+            if (listener != null) listener.onPick(selected);
+            return true;
+        }
+
+        void cycle() {
+            if (!isEnabled() || labels.length <= 1) return;
+            selected = (selected + 1) % labels.length;
+            P5Feedback.click(getContext());
+            invalidate();
+            if (listener != null) listener.onPick(selected);
         }
 
         void setSelectedIndex(int idx) {
@@ -580,8 +662,8 @@ final class P5Views {
                     c.drawPath(segPath, paint);
 
                     paint.setStyle(Paint.Style.STROKE);
-                    paint.setStrokeWidth((act ? 2.0f : 1.3f) * d);
-                    paint.setColor(act ? P5Theme.PAPER_WHITE : P5Theme.BORDER_SUBTLE);
+                    paint.setStrokeWidth((act ? (controllerFocused ? 2.4f : 2.0f) : 1.3f) * d);
+                    paint.setColor(act ? (controllerFocused ? P5Theme.ACID_YELLOW : P5Theme.PAPER_WHITE) : P5Theme.BORDER_SUBTLE);
                     c.drawPath(segPath, paint);
 
                     // Compact label
@@ -614,7 +696,7 @@ final class P5Views {
             this.value = value;
             this.accent = accent;
             setClickable(true);
-            setFocusable(true);
+            setFocusable(false);
             textPaint.setTypeface(P5Theme.monoBold());
         }
 
@@ -822,7 +904,10 @@ final class P5Views {
     static final class AngledRowLayout extends LinearLayout {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path poly = new Path();
+        private final Path notch = new Path();
+        private final Path ptr = new Path();
         private boolean highlight = false;
+        private boolean controllerFocused = false;
 
         AngledRowLayout(Context context) {
             super(context);
@@ -839,6 +924,12 @@ final class P5Views {
             invalidate();
         }
 
+        void setControllerFocused(boolean f) {
+            if (this.controllerFocused == f) return;
+            this.controllerFocused = f;
+            invalidate();
+        }
+
         @Override
         protected void onDraw(Canvas c) {
             float d = P5Theme.dp(getContext(), 1f);
@@ -848,21 +939,109 @@ final class P5Views {
             // Hard dark slab
             P5Theme.setSlantedQuad(poly, 0, 0, w - 3 * d, h - 2 * d, skew * 0.5f, skew);
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(highlight ? Color.argb(245, 28, 12, 14) : P5Theme.INK_SURFACE);
+            if (controllerFocused) {
+                paint.setColor(Color.argb(252, 38, 22, 28));
+            } else {
+                paint.setColor(highlight ? Color.argb(245, 28, 12, 14) : P5Theme.INK_SURFACE);
+            }
             c.drawPath(poly, paint);
 
             // Crisp border
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(1.5f * d);
-            paint.setColor(highlight ? P5Theme.P5_RED : P5Theme.BORDER_SUBTLE);
+            paint.setStrokeWidth((controllerFocused ? 2.4f : 1.5f) * d);
+            paint.setColor(controllerFocused ? P5Theme.ACID_YELLOW : (highlight ? P5Theme.P5_RED : P5Theme.BORDER_SUBTLE));
             c.drawPath(poly, paint);
 
-            // Tiny crimson left notch
+            // Left notch bar + P5 focus pointer
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(highlight ? P5Theme.ACID_YELLOW : P5Theme.P5_RED);
-            Path notch = new Path();
-            P5Theme.setSlantedQuad(notch, 0, 0, 5 * d, h - 2 * d, skew * 0.5f, skew * 0.5f);
+            paint.setColor((controllerFocused || highlight) ? P5Theme.ACID_YELLOW : P5Theme.P5_RED);
+            P5Theme.setSlantedQuad(notch, 0, 0, (controllerFocused ? 7f : 5f) * d, h - 2 * d, skew * 0.5f, skew * 0.5f);
             c.drawPath(notch, paint);
+
+            if (controllerFocused) {
+                float cy = (h - 2 * d) * 0.5f;
+                ptr.reset();
+                ptr.moveTo(6.5f * d, cy - 5.5f * d);
+                ptr.lineTo(13.5f * d, cy);
+                ptr.lineTo(6.5f * d, cy + 5.5f * d);
+                ptr.close();
+                paint.setColor(P5Theme.ACID_YELLOW);
+                c.drawPath(ptr, paint);
+            }
+        }
+    }
+
+    // ---- 7b. Adaptive P5 Controller Hint Bar (Auto-shown on gamepad input, hidden on touch) ----
+
+    static final class ControllerHintBar extends View {
+        private String[] keys = new String[0];
+        private String[] labels = new String[0];
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint keyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint lblPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path bgPoly = new Path();
+        private final Path capPoly = new Path();
+
+        ControllerHintBar(Context context) {
+            super(context);
+            keyPaint.setTypeface(P5Theme.condensedBold());
+            keyPaint.setTextAlign(Paint.Align.CENTER);
+            lblPaint.setTypeface(P5Theme.condensedBold());
+            lblPaint.setTextAlign(Paint.Align.LEFT);
+            setClickable(false);
+            setFocusable(false);
+        }
+
+        void setHints(String[] k, String[] l) {
+            this.keys = k;
+            this.labels = l;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = P5Theme.dp(getContext(), 1f);
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0 || keys.length == 0) return;
+
+            // Slanted ink strip
+            P5Theme.setSlantedQuad(bgPoly, 0, 1 * d, w - 2 * d, h - 1 * d, 8 * d, 8 * d);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(230, 14, 14, 18));
+            c.drawPath(bgPoly, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.2f * d);
+            paint.setColor(Color.argb(140, 230, 0, 18));
+            c.drawPath(bgPoly, paint);
+
+            keyPaint.setTextSize(10.5f * d);
+            lblPaint.setTextSize(10.5f * d);
+            Paint.FontMetrics kfm = keyPaint.getFontMetrics();
+            Paint.FontMetrics lfm = lblPaint.getFontMetrics();
+            float kBase = h * 0.5f - (kfm.ascent + kfm.descent) * 0.5f;
+            float lBase = h * 0.5f - (lfm.ascent + lfm.descent) * 0.5f;
+
+            float x = 14 * d;
+            float capPad = 5.5f * d;
+            float capV = 4.5f * d;
+            for (int i = 0; i < keys.length && i < labels.length; i++) {
+                float kw = Math.max(18 * d, keyPaint.measureText(keys[i]) + capPad * 2f);
+                float lw = lblPaint.measureText(labels[i]);
+                if (x + kw + lw + 16 * d > w) break;
+
+                P5Theme.setSlantedQuad(capPoly, x, capV, x + kw, h - capV, 3.5f * d, 3.5f * d);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(P5Theme.ACID_YELLOW);
+                c.drawPath(capPoly, paint);
+
+                keyPaint.setColor(P5Theme.INK_BLACK);
+                c.drawText(keys[i], x + kw * 0.5f, kBase, keyPaint);
+
+                lblPaint.setColor(P5Theme.PAPER_WHITE);
+                c.drawText(labels[i], x + kw + 5 * d, lBase, lblPaint);
+
+                x += kw + lw + 15 * d;
+            }
         }
     }
 
@@ -1092,6 +1271,7 @@ final class P5Views {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, P5Theme.dpx(ctx, 8), 0, P5Theme.dpx(ctx, 8));
 
+        final List<SlashButton> buttons = new ArrayList<>();
         for (int i = 0; i < labels.length; i++) {
             final int idx = i;
             SlashButton btn = new SlashButton(ctx, labels[i], i == current, 42);
@@ -1105,12 +1285,52 @@ final class P5Views {
                     cb.onPick(idx);
                 }
             });
+            buttons.add(btn);
             list.addView(btn, lp);
         }
         sc.addView(list);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
                 contentW, Math.min(maxListH, labels.length * P5Theme.dpx(ctx, 48) + P5Theme.dpx(ctx, 14)));
         frame.addView(sc, scLp);
+
+        final int[] focused = {Math.max(0, Math.min(labels.length - 1, current))};
+        final boolean[] focusVisible = {false};
+        dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
+            @Override
+            public boolean onKey(DialogInterface d, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (buttons.isEmpty()) return true;
+                    if (!focusVisible[0]) {
+                        focusVisible[0] = true;
+                    } else {
+                        buttons.get(focused[0]).setControllerFocused(false);
+                        int dir = (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) ? 1 : -1;
+                        focused[0] = (focused[0] + dir + buttons.size()) % buttons.size();
+                    }
+                    buttons.get(focused[0]).setControllerFocused(true);
+                    P5Feedback.tick(ctx);
+                    int rowH = P5Theme.dpx(ctx, 48);
+                    int targetY = Math.max(0, focused[0] * rowH - sc.getHeight() / 2 + rowH / 2);
+                    sc.smoothScrollTo(0, targetY);
+                    return true;
+                }
+                if (isConfirmKey(keyCode)) {
+                    if (!buttons.isEmpty()) {
+                        P5Feedback.confirm(ctx);
+                        dlg.dismiss();
+                        cb.onPick(focused[0]);
+                    }
+                    return true;
+                }
+                if (isBackKey(keyCode)) {
+                    P5Feedback.cancel(ctx);
+                    dlg.dismiss();
+                    return true;
+                }
+                return false;
+            }
+        });
 
         dlg.setContentView(frame);
         dlg.show();
@@ -1158,6 +1378,7 @@ final class P5Views {
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.END);
 
+        final List<SlashButton> actionBtns = new ArrayList<>();
         if (negLabel != null) {
             SlashButton neg = new SlashButton(ctx, negLabel, false, 40);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, P5Theme.dpx(ctx, 40));
@@ -1169,6 +1390,7 @@ final class P5Views {
                     dlg.dismiss();
                 }
             });
+            actionBtns.add(neg);
             actions.addView(neg, lp);
         }
         if (neutralLabel != null) {
@@ -1182,6 +1404,7 @@ final class P5Views {
                     if (onNeutral != null) onNeutral.run();
                 }
             });
+            actionBtns.add(neu);
             actions.addView(neu, lp);
         }
         SlashButton pos = new SlashButton(ctx, posLabel != null ? posLabel : "OK", true, 40);
@@ -1192,8 +1415,41 @@ final class P5Views {
                 if (onPos != null) onPos.run();
             }
         });
+        actionBtns.add(pos);
         actions.addView(pos, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, P5Theme.dpx(ctx, 40)));
         frame.addView(actions, new LinearLayout.LayoutParams(contentW, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final int[] focused = {actionBtns.size() - 1};
+        final boolean[] focusVisible = {false};
+        dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
+            @Override
+            public boolean onKey(DialogInterface d, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    if (actionBtns.size() <= 1) return true;
+                    if (!focusVisible[0]) {
+                        focusVisible[0] = true;
+                    } else {
+                        actionBtns.get(focused[0]).setControllerFocused(false);
+                        int dir = (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) ? 1 : -1;
+                        focused[0] = (focused[0] + dir + actionBtns.size()) % actionBtns.size();
+                    }
+                    actionBtns.get(focused[0]).setControllerFocused(true);
+                    P5Feedback.tick(ctx);
+                    return true;
+                }
+                if (isConfirmKey(keyCode)) {
+                    actionBtns.get(focused[0]).performClick();
+                    return true;
+                }
+                if (isBackKey(keyCode)) {
+                    P5Feedback.cancel(ctx);
+                    dlg.dismiss();
+                    return true;
+                }
+                return false;
+            }
+        });
 
         dlg.setContentView(frame);
         dlg.show();
