@@ -125,6 +125,12 @@ struct Pass {
     VkPipeline fxaa = VK_NULL_HANDLE;
     bool fsr_logged = false;
     bool enhance_logged = false;
+    bool cfg_fsr = false;
+    bool cfg_cas = false;
+    bool cfg_fxaa = false;
+    int cfg_color = 0;
+    float cfg_cas_strength = 0.72f;
+    float cfg_fsr_sharp = 0.2f;
     struct PresentSetEntry {
         uint64_t epoch = 0;
         VkImageView view = VK_NULL_HANDLE;
@@ -135,56 +141,56 @@ struct Pass {
     uint32_t set_cache_next = 0;
 } g;
 
-bool fsr_on() {
-    static const bool on = [] {
-        const char* e = std::getenv("NX_FSR");
-        return e && e[0] == '1';
-    }();
-    return on;
+bool read_fsr_env() {
+    const char* e = std::getenv("NX_FSR");
+    return e && e[0] == '1';
 }
 
-bool cas_on() {
-    static const bool on = [] {
-        const char* e = std::getenv("NX_CAS");
-        return e && e[0] == '1';
-    }();
-    return on;
+bool read_cas_env() {
+    const char* e = std::getenv("NX_CAS");
+    return e && e[0] == '1';
 }
 
-float cas_strength() {
-    static const float v = [] {
-        const char* e = std::getenv("NX_CAS_STRENGTH");
-        return e ? std::clamp(float(std::atof(e)), 0.0f, 1.0f) : 0.72f;
-    }();
-    return v;
+float read_cas_strength_env() {
+    const char* e = std::getenv("NX_CAS_STRENGTH");
+    return e ? std::clamp(float(std::atof(e)), 0.0f, 1.0f) : 0.72f;
 }
 
-bool fxaa_on() {
-    static const bool on = [] {
-        const char* e = std::getenv("NX_FXAA");
-        return e && e[0] == '1';
-    }();
-    return on;
+bool read_fxaa_env() {
+    const char* e = std::getenv("NX_FXAA");
+    return e && e[0] == '1';
 }
 
-int color_profile() {  // 0 = default, 1 = vivid, 2 = p5 pop
-    static const int mode = [] {
-        const char* e = std::getenv("NX_COLOR_PROFILE");
-        if (!e || !e[0] || e[0] == '0' || std::strcmp(e, "default") == 0) return 0;
-        if (e[0] == '2' || std::strcmp(e, "pop") == 0) return 2;
-        if (e[0] == '1' || std::strcmp(e, "vivid") == 0) return 1;
-        return 0;
-    }();
-    return mode;
+int read_color_profile_env() {  // 0 = default, 1 = vivid, 2 = p5 pop
+    const char* e = std::getenv("NX_COLOR_PROFILE");
+    if (!e || !e[0] || e[0] == '0' || std::strcmp(e, "default") == 0) return 0;
+    if (e[0] == '2' || std::strcmp(e, "pop") == 0) return 2;
+    if (e[0] == '1' || std::strcmp(e, "vivid") == 0) return 1;
+    return 0;
 }
 
-float fsr_sharpness() {  // stops of sharpening: 0 the most, 2 none (FSR's own default is 0.2)
-    static const float v = [] {
-        const char* e = std::getenv("NX_FSR_SHARP");
-        return e ? std::max(0.0f, std::min(2.0f, float(std::atof(e)))) : 0.2f;
-    }();
-    return v;
+float read_fsr_sharpness_env() {  // stops of sharpening: 0 the most, 2 none (FSR's own default is 0.2)
+    const char* e = std::getenv("NX_FSR_SHARP");
+    return e ? std::max(0.0f, std::min(2.0f, float(std::atof(e)))) : 0.2f;
 }
+
+void refresh_present_config() {
+    g.cfg_fsr = read_fsr_env();
+    g.cfg_cas = read_cas_env();
+    g.cfg_fxaa = read_fxaa_env();
+    g.cfg_color = read_color_profile_env();
+    g.cfg_cas_strength = read_cas_strength_env();
+    g.cfg_fsr_sharp = read_fsr_sharpness_env();
+    g.fsr_logged = false;
+    g.enhance_logged = false;
+}
+
+bool fsr_on() { return g.cfg_fsr; }
+bool cas_on() { return g.cfg_cas; }
+float cas_strength() { return g.cfg_cas_strength; }
+bool fxaa_on() { return g.cfg_fxaa; }
+int color_profile() { return g.cfg_color; }
+float fsr_sharpness() { return g.cfg_fsr_sharp; }
 
 VkShaderModule module(const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -369,10 +375,17 @@ bool present_pass_targets(VkFormat format, const std::vector<VkImage>& images, V
         if (g.fxaa) p_vkDestroyPipeline(d, g.fxaa, nullptr);
         g.rcas = g.cas = g.fxaa = VK_NULL_HANDLE;
     }
+    refresh_present_config();
     if (!g.pipeline && !make_pipeline(format)) {
         log("nvn/vk: present pass unavailable: frames are blitted");
         g.failed = true;
         return false;
+    }
+    // Lazily build newly toggled enhancement pipelines when relaunching in the same process.
+    if (g.render_pass) {
+        if (fsr_on() && !g.rcas) make_fsr();
+        if (cas_on() && !fxaa_on() && !g.cas) build_pipeline(g.render_pass, kCas, sizeof kCas, &g.cas);
+        if (fxaa_on() && !g.fxaa) build_pipeline(g.render_pass, kFxaa, sizeof kFxaa, &g.fxaa);
     }
     VkDevice d = vk_device();
     for (VkImage img : images) {
@@ -468,8 +481,8 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     const int cprof = color_profile();
     p.off[2] = std::exp2(-fsr_sharpness());
     p.post[0] = cas_on() ? cas_strength() : 0.0f;
-    p.post[1] = (cprof == 2) ? 0.30f : (cprof == 1 ? 0.18f : 0.0f);
-    p.post[2] = (cprof == 2) ? 0.11f : (cprof == 1 ? 0.06f : 0.0f);
+    p.post[1] = (cprof == 2) ? 0.68f : (cprof == 1 ? 0.42f : 0.0f);
+    p.post[2] = (cprof == 2) ? 0.38f : (cprof == 1 ? 0.22f : 0.0f);
     p.post[3] = 0.0f;
     if (use_fsr && !g.fsr_logged) {
         log("nvn/vk: FSR 1 (single-pass mobile): %.0fx%.0f -> %ux%u (sharpness %.2f stops, color=%d)",
