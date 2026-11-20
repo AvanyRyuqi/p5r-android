@@ -2,6 +2,8 @@
 // resources, draws). Everything here runs under the GPU lock taken by gpu_submit / gpu_present.
 #pragma once
 
+#include <algorithm>
+#include <climits>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -54,10 +56,14 @@ struct GpuImage {
 bool low_3d_on();
 int32_t low_3d_num();
 int32_t low_3d_den();
-inline int32_t low_3d_down(int32_t v) { return int32_t((int64_t(v) * low_3d_num()) / low_3d_den()); }
-inline int32_t low_3d_down_end(int32_t v) {
-    const int32_t den = low_3d_den();
-    return int32_t((int64_t(v) * low_3d_num() + (den - 1)) / den);
+inline int32_t low_3d_down(int64_t v) {
+    const int64_t r = (v * low_3d_num()) / low_3d_den();
+    return int32_t(std::clamp<int64_t>(r, INT32_MIN, INT32_MAX));
+}
+inline int32_t low_3d_down_end(int64_t v) {
+    const int64_t den = low_3d_den();
+    const int64_t r = (v * low_3d_num() + (den - 1)) / den;
+    return int32_t(std::clamp<int64_t>(r, INT32_MIN, INT32_MAX));
 }
 inline float low_3d_scale() { return float(low_3d_num()) / float(low_3d_den()); }
 bool low_3d_texture(const Texture& t);
@@ -70,8 +76,14 @@ bool low_3d_texture(const Texture& t);
 struct Texture;
 bool hud_1080_texture(const Texture& t);
 int32_t hud_quarters();  // the scale in quarters: 6 (1080p) or 5 (900p)
-inline int32_t hud_up(int32_t v) { return int32_t((int64_t(v) * hud_quarters()) >> 2); }
-inline int32_t hud_up_end(int32_t v) { return int32_t((int64_t(v) * hud_quarters() + 3) >> 2); }
+inline int32_t hud_up(int64_t v) {
+    const int64_t r = (v * hud_quarters()) >> 2;
+    return int32_t(std::clamp<int64_t>(r, INT32_MIN, INT32_MAX));
+}
+inline int32_t hud_up_end(int64_t v) {
+    const int64_t r = (v * hud_quarters() + 3) >> 2;
+    return int32_t(std::clamp<int64_t>(r, INT32_MIN, INT32_MAX));
+}
 inline float hud_scale() { return float(hud_quarters()) / 4.0f; }
 
 VkDevice vk_device();
