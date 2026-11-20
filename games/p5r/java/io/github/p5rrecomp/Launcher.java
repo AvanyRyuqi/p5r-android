@@ -717,6 +717,13 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_ASYNC_PIPELINES",
+                "Compilación de shaders", "Shader Compilation",
+                "Asíncrono evita tirones; Síncrono evita texturas blancas al entrar a zonas nuevas",
+                "Async avoids hitches (surfaces pop in); Sync compiles on load (no white pop-in)",
+                new String[] {"2", "0"},
+                new String[] {"ASÍNCRONO", "SÍNCRONO"},
+                new String[] {"ASYNC", "SYNC"}, 0, false));
         options.add(new Option(TAB_PERFORMANCE, "GRAPHICS",
                 "Calidad de texturas", "Texture Quality",
                 "Sesgo de mipmaps (Nítido usa -0.5 para mayor detalle)",
