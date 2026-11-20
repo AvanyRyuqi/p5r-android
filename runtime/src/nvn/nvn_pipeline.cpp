@@ -610,19 +610,29 @@ PKey bytes_of(const PipelineKey& k) {
 //   1: all graphics draws compile asynchronously (can blink fullscreen/shadow passes on first frame).
 //   2 (Android default): smart safe async — shadows, early boot, fullscreen quads, bloom mips, cubemaps,
 //      and unrendered offscreen bakes stay synchronous; world/character/battle VFX compile on workers.
-int async_pipelines_mode() {
-    static const int mode = [] {
-        if (const char* e = std::getenv("NX_ASYNC_PIPELINES")) {
-            if (e[0] == '0') return 0;
-            if (e[0] == '1') return 1;
-            if (e[0] == '2') return 2;
-        }
+std::atomic<int> g_async_pipelines_mode{-1};
+
+void refresh_async_pipelines_env() {
+    int mode =
 #if defined(__ANDROID__)
-        return 2;
+        2;
 #else
-        return 0;
+        0;
 #endif
-    }();
+    if (const char* e = std::getenv("NX_ASYNC_PIPELINES")) {
+        if (e[0] == '0') mode = 0;
+        else if (e[0] == '1') mode = 1;
+        else if (e[0] == '2') mode = 2;
+    }
+    g_async_pipelines_mode.store(mode, std::memory_order_relaxed);
+}
+
+int async_pipelines_mode() {
+    int mode = g_async_pipelines_mode.load(std::memory_order_relaxed);
+    if (mode < 0) {
+        refresh_async_pipelines_env();
+        mode = g_async_pipelines_mode.load(std::memory_order_relaxed);
+    }
     return mode;
 }
 
@@ -670,6 +680,8 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
 }
 
 }  // namespace
+
+void pipeline_refresh_config() { refresh_async_pipelines_env(); }
 
 bool pipeline_workers_busy() {
     if (!g_pool_ready.load(std::memory_order_acquire)) return false;

@@ -786,10 +786,12 @@ void crash(int sig, siginfo_t* info, void* uc) {
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
 #if NX_NCE
     // In the game's own code: its registers are in the signal's context, not in the thread's CPU.
+    bool in_guest = false;
     if (nx::self_thread()) {
         static nx::CPU fault;
         uint64_t pc = 0;
         if (nx::nce::guest_fault_context(uc, fault, pc)) {
+            in_guest = true;
             nx::log("  in guest code at %s, lr %s, sp %llx", nx::describe(pc).c_str(), nx::describe(fault.x[30]).c_str(),
                     (unsigned long long)fault.x[31]);
             for (int k = 0; k < 32; k += 4)
@@ -797,6 +799,27 @@ void crash(int sig, siginfo_t* info, void* uc) {
                         (unsigned long long)fault.x[k + 1], (unsigned long long)fault.x[k + 2], (unsigned long long)fault.x[k + 3]);
             nx::backtrace(fault);
         }
+    }
+    if (!in_guest && uc) {
+        const mcontext_t& m = static_cast<const ucontext_t*>(uc)->uc_mcontext;
+        const uintptr_t host_pc = uintptr_t(m.pc);
+        const uintptr_t host_lr = uintptr_t(m.regs[30]);
+        Dl_info dpc{}, dlr{};
+        const bool has_pc = dladdr(reinterpret_cast<const void*>(host_pc), &dpc) != 0;
+        const bool has_lr = dladdr(reinterpret_cast<const void*>(host_lr), &dlr) != 0;
+        const char* active_hle = nullptr;
+        if (nx::KThread* kt = nx::self_thread()) active_hle = kt->hle.load(std::memory_order_relaxed);
+        nx::log("  in host code: hle=%s", active_hle ? active_hle : "(none)");
+        nx::log("  host pc %#llx (%s+%#llx %s+%#llx)", (unsigned long long)host_pc,
+                has_pc && dpc.dli_fname ? dpc.dli_fname : "?",
+                (unsigned long long)(has_pc && dpc.dli_fbase ? host_pc - uintptr_t(dpc.dli_fbase) : 0),
+                has_pc && dpc.dli_sname ? dpc.dli_sname : "?",
+                (unsigned long long)(has_pc && dpc.dli_saddr ? host_pc - uintptr_t(dpc.dli_saddr) : 0));
+        nx::log("  host lr %#llx (%s+%#llx %s+%#llx)", (unsigned long long)host_lr,
+                has_lr && dlr.dli_fname ? dlr.dli_fname : "?",
+                (unsigned long long)(has_lr && dlr.dli_fbase ? host_lr - uintptr_t(dlr.dli_fbase) : 0),
+                has_lr && dlr.dli_sname ? dlr.dli_sname : "?",
+                (unsigned long long)(has_lr && dlr.dli_saddr ? host_lr - uintptr_t(dlr.dli_saddr) : 0));
     }
 #endif
     if (nx::self_thread()) {
@@ -1417,6 +1440,7 @@ extern "C" void android_main(android_app* app) {
         unsetenv("NX_FSR_SHARP");
         unsetenv("NX_FXAA");
         unsetenv("NX_COLOR_PROFILE");
+        unsetenv("NX_ASYNC_PIPELINES");
         std::ifstream f(g_root + "/config.txt");
         std::string line;
         while (std::getline(f, line)) {

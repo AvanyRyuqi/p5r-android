@@ -21,8 +21,9 @@ namespace nx::nvn {
 
 using namespace nx::vk;
 
-void sampler_refresh_config();  // nvn_sampler.cpp
-void draw_refresh_config();     // nvn_draw.cpp
+void sampler_refresh_config();   // nvn_sampler.cpp
+void draw_refresh_config();      // nvn_draw.cpp
+void pipeline_refresh_config();  // nvn_pipeline.cpp
 
 namespace {
 
@@ -191,6 +192,7 @@ void refresh_present_config() {
     g.enhance_logged = false;
     sampler_refresh_config();
     draw_refresh_config();
+    pipeline_refresh_config();
 }
 
 bool fsr_on() { return g.cfg_fsr; }
