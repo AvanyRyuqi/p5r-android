@@ -614,7 +614,7 @@ public class Launcher extends Activity {
     }
 
     private void initOptions() {
-        // DISPLAY (Resolution & Scaling -> Widescreen & Framing -> Language)
+        // DISPLAY (Resolution & Scaling -> Image Enhancement -> Widescreen & Framing -> Language)
         options.add(new Option(TAB_DISPLAY, "RESOLUTION",
                 "Resolución 3D", "3D Resolution",
                 "Escala de renderizado 3D (la interfaz se mantiene nítida)",
@@ -629,13 +629,27 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"720P", "1080P"},
                 new String[] {"720P", "1080P"}, 0, false));
-        options.add(new Option(TAB_DISPLAY, "NX_FSR",
-                "Superresolución (FSR 1.0)", "Super Resolution (FSR 1.0)",
-                "Reescalado y nitidez en la salida final (coste extra en GPU)",
-                "Upscaling and sharpening pass on output (adds GPU cost)",
+        options.add(new Option(TAB_DISPLAY, "SHARPEN_MODE",
+                "Nitidez y reescalado", "Sharpening & Upscaling",
+                "CAS es ligero y sin halos; FSR 1.0 reescala a resolución nativa",
+                "CAS is fast & ring-free; FSR 1.0 upscales to native display",
+                new String[] {"off", "cas", "fsr"},
+                new String[] {"NO", "CAS", "FSR 1.0"},
+                new String[] {"OFF", "CAS", "FSR 1.0"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_FXAA",
+                "Suavizado de bordes (FXAA)", "Anti-Aliasing (FXAA)",
+                "Suaviza los dientes de sierra 3D con bajo coste en GPU",
+                "Smooths 3D stair-stepping jaggies with low GPU overhead",
                 new String[] {"0", "1"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
+        options.add(new Option(TAB_DISPLAY, "NX_COLOR_PROFILE",
+                "Perfil de color", "Color Profile",
+                "Realza vibrancia y contraste sin coste de rendimiento",
+                "Zero-cost vibrance and contrast punch in the present pass",
+                new String[] {"0", "1", "2"},
+                new String[] {"NORMAL", "VÍVIDO", "P5 POP"},
+                new String[] {"DEFAULT", "VIVID", "P5 POP"}, 0, false));
         options.add(new Option(TAB_DISPLAY, "NX_ULTRAWIDE",
                 "Pantalla ancha real (Hor+)", "True Widescreen (Hor+)",
                 "Amplía el campo de visión horizontal en pantallas 20:9 / 21:9",
@@ -684,11 +698,18 @@ public class Launcher extends Activity {
                 new String[] {"OFF", "ON"}, 0, false));
         options.add(new Option(TAB_PERFORMANCE, "GRAPHICS",
                 "Calidad de texturas", "Texture Quality",
-                "Ajusta el sesgo de mipmaps (Bajo reduce uso de memoria)",
-                "Controls texture mipmap LOD bias (Low saves bandwidth)",
-                new String[] {"low", "medium", "high"},
-                new String[] {"BAJO", "MEDIO", "ALTO"},
-                new String[] {"LOW", "MED", "HIGH"}, 0, false));
+                "Sesgo de mipmaps (Nítido usa -0.5 para mayor detalle)",
+                "Texture mipmap LOD bias (Sharp uses -0.5 for crisper detail)",
+                new String[] {"low", "medium", "high", "sharp"},
+                new String[] {"BAJO", "MEDIO", "ALTO", "NÍTIDO"},
+                new String[] {"LOW", "MED", "HIGH", "SHARP"}, 0, false));
+        options.add(new Option(TAB_PERFORMANCE, "NX_MAX_ANISO",
+                "Filtro anisotrópico", "Anisotropic Filtering",
+                "Claridad en suelos y calles en ángulo (4X es casi gratis en Mali)",
+                "Sharpens angled floors, streets & walls (4X is nearly free)",
+                new String[] {"auto", "2", "4", "8", "16"},
+                new String[] {"AUTO", "2X", "4X", "8X", "16X"},
+                new String[] {"AUTO", "2X", "4X", "8X", "16X"}, 0, false));
         options.add(new Option(TAB_PERFORMANCE, "NX_SHADOWS",
                 "Sombras dinámicas", "Dynamic Shadows",
                 "Desactivarlas ahorra ~9% de GPU en escenas 3D",
@@ -948,7 +969,7 @@ public class Launcher extends Activity {
         specView = addSpecBadge(specBar, "VIEW", "16:9", false, TAB_DISPLAY);
         specFps = addSpecBadge(specBar, "FPS", "30", false, TAB_PERFORMANCE);
         specGfx = addSpecBadge(specBar, "GFX", "LOW", false, TAB_PERFORMANCE);
-        specExtra = addSpecBadge(specBar, "FSR", "OFF", false, TAB_DISPLAY);
+        specExtra = addSpecBadge(specBar, "ENH", "OFF", false, TAB_DISPLAY);
         panel.addView(specBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -1044,6 +1065,8 @@ public class Launcher extends Activity {
             if (tab == TAB_DISPLAY) {
                 if ("RESOLUTION".equals(o.key)) {
                     addGroupHeader(list, t("RESOLUCIÓN Y ESCALADO", "RESOLUTION & SCALING"), false);
+                } else if ("NX_FXAA".equals(o.key)) {
+                    addGroupHeader(list, t("MEJORA DE IMAGEN", "IMAGE ENHANCEMENT"), true);
                 } else if ("NX_ULTRAWIDE".equals(o.key)) {
                     addGroupHeader(list, t("PANTALLA ANCHA Y ENCUADRE", "WIDESCREEN & FRAMING"), true);
                 } else if ("language".equals(o.key)) {
@@ -1666,6 +1689,14 @@ public class Launcher extends Activity {
                     else v = "720p";
                 }
             }
+            if ("SHARPEN_MODE".equals(o.key) && v == null) {
+                if ("1".equals(config.get("NX_FSR"))) v = "fsr";
+                else if ("1".equals(config.get("NX_CAS"))) v = "cas";
+                else v = "off";
+            }
+            if ("NX_MAX_ANISO".equals(o.key) && v == null) {
+                v = "auto";
+            }
             for (int k = 0; v != null && k < o.values.length; k++) {
                 if (o.values[k].equals(v)) o.pick = k;
             }
@@ -1713,7 +1744,8 @@ public class Launcher extends Activity {
         Option resOpt = findOption("RESOLUTION");
         Option fpsOpt = findOption("NX_FPS_CAP");
         Option gfxOpt = findOption("GRAPHICS");
-        Option fsrOpt = findOption("NX_FSR");
+        Option sharpOpt = findOption("SHARPEN_MODE");
+        Option fxaaOpt = findOption("NX_FXAA");
 
         if (specRes != null && resOpt != null) {
             specRes.setValue(resOpt.values[resOpt.pick].toUpperCase(Locale.ROOT), true);
@@ -1728,9 +1760,16 @@ public class Launcher extends Activity {
         if (specGfx != null && gfxOpt != null) {
             specGfx.setValue(gfxOpt.values[gfxOpt.pick].toUpperCase(Locale.ROOT), false);
         }
-        if (specExtra != null && fsrOpt != null) {
-            boolean fsrOn = "1".equals(fsrOpt.values[fsrOpt.pick]);
-            specExtra.setValue(fsrOn ? "ON" : "OFF", false);
+        if (specExtra != null) {
+            String sm = (sharpOpt != null) ? sharpOpt.values[sharpOpt.pick] : "off";
+            boolean fxaaOn = fxaaOpt != null && "1".equals(fxaaOpt.values[fxaaOpt.pick]);
+            String enhVal;
+            if ("fsr".equals(sm)) enhVal = "FSR";
+            else if ("cas".equals(sm) && fxaaOn) enhVal = "CAS+AA";
+            else if ("cas".equals(sm)) enhVal = "CAS";
+            else if (fxaaOn) enhVal = "FXAA";
+            else enhVal = "OFF";
+            specExtra.setValue(enhVal, !"OFF".equals(enhVal));
         }
     }
 
@@ -2012,10 +2051,15 @@ public class Launcher extends Activity {
             config.put("NX_RES", "720p");
         }
         for (String k : new String[] {"RENDER_SCALE", "NX_ANISO_MAX", "NX_LOD_BIAS"}) config.remove(k);
+        if ("auto".equals(config.get("NX_MAX_ANISO"))) config.remove("NX_MAX_ANISO");
+        final String sharpMode = config.get("SHARPEN_MODE");
+        config.put("NX_FSR", "fsr".equals(sharpMode) ? "1" : "0");
+        config.put("NX_CAS", "cas".equals(sharpMode) ? "1" : "0");
         if ("1".equals(config.get("NX_ULTRAWIDE"))) config.put("NX_STRETCH", "0");
         final String preset = config.get("GRAPHICS");
         if ("low".equals(preset)) config.put("NX_LOD_BIAS", "1");
         else if ("medium".equals(preset)) config.put("NX_LOD_BIAS", "0.5");
+        else if ("sharp".equals(preset)) config.put("NX_LOD_BIAS", "-0.5");
         writeConfig(new File(dataDir(), "config.txt"), config);
     }
 
