@@ -106,6 +106,10 @@ public class Launcher extends Activity {
     private final View[] tabPanels = new View[TAB_COUNT];
     private final LinearLayout[] tabLists = new LinearLayout[TAB_COUNT];
     private final ScrollView[] tabScrolls = new ScrollView[TAB_COUNT];
+    private final P5Views.SubTabBar[] subTabBars = new P5Views.SubTabBar[TAB_COUNT];
+    private final int[] activeSubTab = new int[TAB_COUNT];
+    private final int[] subTabCount = new int[TAB_COUNT];
+    private final Map<View, Integer> rowSubTabs = new java.util.HashMap<>();
     private int activeTab = TAB_PLAY;
 
     // Physical controller navigation state
@@ -117,6 +121,7 @@ public class Launcher extends Activity {
     private int stickDirX = 0;
     private boolean ltDown = false;
     private boolean rtDown = false;
+    private long lastTriggerMs = 0L;
     private final Handler stickRepeatHandler = new Handler(Looper.getMainLooper());
     private final Runnable stickRepeatTask = new Runnable() {
         @Override
@@ -1038,11 +1043,11 @@ public class Launcher extends Activity {
         specBar.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         specBar.setClipChildren(false);
 
-        specRes = addSpecBadge(specBar, "RES", "540P", true, TAB_DISPLAY);
-        specView = addSpecBadge(specBar, "VIEW", "16:9", false, TAB_DISPLAY);
-        specFps = addSpecBadge(specBar, "FPS", "30", false, TAB_PERFORMANCE);
-        specGfx = addSpecBadge(specBar, "GFX", "LOW", false, TAB_PERFORMANCE);
-        specExtra = addSpecBadge(specBar, "ENH", "OFF", false, TAB_DISPLAY);
+        specRes = addSpecBadge(specBar, "RES", "540P", true, TAB_DISPLAY, 0);
+        specView = addSpecBadge(specBar, "VIEW", "16:9", false, TAB_DISPLAY, 2);
+        specFps = addSpecBadge(specBar, "FPS", "30", false, TAB_PERFORMANCE, 0);
+        specGfx = addSpecBadge(specBar, "GFX", "LOW", false, TAB_PERFORMANCE, 1);
+        specExtra = addSpecBadge(specBar, "ENH", "OFF", false, TAB_DISPLAY, 1);
         panel.addView(specBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -1093,11 +1098,12 @@ public class Launcher extends Activity {
         return panel;
     }
 
-    private P5Views.SpecBadge addSpecBadge(LinearLayout bar, String key, String val, boolean accent, final int targetTab) {
+    private P5Views.SpecBadge addSpecBadge(LinearLayout bar, String key, String val, boolean accent,
+                                           final int targetTab, final int targetSubTab) {
         P5Views.SpecBadge b = new P5Views.SpecBadge(this, key, val, accent);
         b.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View v) { selectTab(targetTab, true); }
+            public void onClick(View v) { selectTab(targetTab, targetSubTab, true); }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(28));
@@ -1115,15 +1121,49 @@ public class Launcher extends Activity {
         parent.addView(gh, lp);
     }
 
+    private void addHeaderWithSubTabs(LinearLayout col, final int tab, String title, String[] subLabels) {
+        FrameLayout headerRow = new FrameLayout(this);
+        headerRow.setClipChildren(false);
+        headerRow.setClipToPadding(false);
+
+        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this, title, "");
+        headerRow.addView(hdr, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(44)));
+
+        P5Views.SubTabBar bar = new P5Views.SubTabBar(this, subLabels, 0, new P5Views.SubTabBar.OnSubTabListener() {
+            @Override
+            public void onPick(int index) {
+                selectSubTab(tab, index, true);
+            }
+        });
+        subTabBars[tab] = bar;
+        subTabCount[tab] = subLabels.length;
+        activeSubTab[tab] = 0;
+        FrameLayout.LayoutParams bLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, dp(32), Gravity.END | Gravity.CENTER_VERTICAL);
+        bLp.bottomMargin = dp(2);
+        headerRow.addView(bar, bLp);
+
+        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        hLp.bottomMargin = dp(6);
+        col.addView(headerRow, hLp);
+    }
+
+    private void tagSubTabFrom(LinearLayout list, int startIndex, int subIdx) {
+        for (int i = startIndex; i < list.getChildCount(); i++) {
+            rowSubTabs.put(list.getChildAt(i), subIdx);
+        }
+    }
+
     private View buildSettingsPanel(int tab, String title, String subtitle) {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
 
-        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this, title, subtitle);
-        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(6);
-        col.addView(hdr, hLp);
+        String[] subLabels = (tab == TAB_DISPLAY)
+                ? new String[] {t("ESCALADO", "SCALING"), t("MEJORA", "ENHANCE"), t("ENCUADRE", "FRAMING")}
+                : new String[] {t("MOTOR", "ENGINE"), t("CALIDAD", "QUALITY"), t("REGISTROS", "LOGS")};
+        addHeaderWithSubTabs(col, tab, title, subLabels);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -1133,34 +1173,28 @@ public class Launcher extends Activity {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(4), 0, dp(16));
 
+        int curSub = 0;
         for (Option o : options) {
             if (o.tab != tab) continue;
             if (tab == TAB_DISPLAY) {
-                if ("RESOLUTION".equals(o.key)) {
-                    addGroupHeader(list, t("RESOLUCIÓN Y ESCALADO", "RESOLUTION & SCALING"), false);
-                } else if ("NX_FXAA".equals(o.key)) {
-                    addGroupHeader(list, t("MEJORA DE IMAGEN", "IMAGE ENHANCEMENT"), true);
-                } else if ("NX_ULTRAWIDE".equals(o.key)) {
-                    addGroupHeader(list, t("PANTALLA ANCHA Y ENCUADRE", "WIDESCREEN & FRAMING"), true);
-                } else if ("language".equals(o.key)) {
-                    addGroupHeader(list, t("IDIOMA", "LANGUAGE"), true);
-                }
+                if ("RESOLUTION".equals(o.key)) curSub = 0;
+                else if ("NX_FXAA".equals(o.key)) curSub = 1;
+                else if ("NX_ULTRAWIDE".equals(o.key)) curSub = 2;
             } else if (tab == TAB_PERFORMANCE) {
-                if ("NX_FPS_CAP".equals(o.key)) {
-                    addGroupHeader(list, t("MOTOR Y FLUIDEZ", "ENGINE & PACING"), false);
-                } else if ("GRAPHICS".equals(o.key)) {
-                    addGroupHeader(list, t("CALIDAD VISUAL", "VISUAL QUALITY"), true);
-                } else if ("NX_SHOW_FPS".equals(o.key)) {
-                    addGroupHeader(list, t("DIAGNÓSTICO", "DIAGNOSTICS"), true);
-                }
+                if ("NX_FPS_CAP".equals(o.key)) curSub = 0;
+                else if ("GRAPHICS".equals(o.key)) curSub = 1;
+                else if ("NX_SHOW_FPS".equals(o.key)) curSub = 2;
             }
+            int before = list.getChildCount();
             addOptionRow(list, o);
+            tagSubTabFrom(list, before, curSub);
         }
         tabLists[tab] = list;
         tabScrolls[tab] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        applySubTabVisibility(tab, 0);
         return col;
     }
 
@@ -1168,12 +1202,8 @@ public class Launcher extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
 
-        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
-                t("CONTROLES", "CONTROLS"), "");
-        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(6);
-        col.addView(hdr, hLp);
+        addHeaderWithSubTabs(col, TAB_CONTROLS, t("CONTROLES", "CONTROLS"),
+                new String[] {t("TÁCTIL", "TOUCH"), t("MANDO", "GAMEPAD")});
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -1183,7 +1213,7 @@ public class Launcher extends Activity {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(4), 0, dp(16));
 
-        addGroupHeader(list, t("CONTROLES TÁCTILES", "TOUCHSCREEN"), false);
+        int before = list.getChildCount();
         Option touchShow = findOption("NX_TOUCH_SHOW");
         if (touchShow != null) addOptionRow(list, touchShow);
 
@@ -1201,19 +1231,21 @@ public class Launcher extends Activity {
                         startActivity(new Intent(Launcher.this, ControlsEditor.class));
                     }
                 }, null, null, true);
+        tagSubTabFrom(list, before, 0);
 
         for (Option o : options) {
             if (o.tab != TAB_CONTROLS || "NX_TOUCH_SHOW".equals(o.key)) continue;
-            if ("NX_GAMEPAD_LAYOUT".equals(o.key)) {
-                addGroupHeader(list, t("MANDO FÍSICO", "GAMEPAD"), true);
-            }
+            int sub = "NX_GAMEPAD_LAYOUT".equals(o.key) ? 1 : 0;
+            int b = list.getChildCount();
             addOptionRow(list, o);
+            tagSubTabFrom(list, b, sub);
         }
         tabLists[TAB_CONTROLS] = list;
         tabScrolls[TAB_CONTROLS] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        applySubTabVisibility(TAB_CONTROLS, 0);
         return col;
     }
 
@@ -1221,12 +1253,8 @@ public class Launcher extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
 
-        P5Views.SectionHeaderView hdr = new P5Views.SectionHeaderView(this,
-                t("ARCHIVOS Y MODS", "FILES & MODS"), "");
-        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        hLp.bottomMargin = dp(6);
-        col.addView(hdr, hLp);
+        addHeaderWithSubTabs(col, TAB_FILES, t("ARCHIVOS", "FILES"),
+                new String[] {t("DATOS", "DATA"), t("APARIENCIA", "APPEARANCE"), t("REGISTROS", "LOGS")});
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -1236,7 +1264,7 @@ public class Launcher extends Activity {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, dp(4), 0, dp(16));
 
-        addGroupHeader(list, t("JUEGO Y DATOS", "GAME & DATA"), false);
+        int filesDataStart = list.getChildCount();
 
         gameSub = addActionRow(list,
                 t("Archivo del juego (.nsp / .xci)", "Game File (.nsp / .xci)"),
@@ -1304,7 +1332,8 @@ public class Launcher extends Activity {
                     public void onClick(View v) { removeDriver(); }
                 }, false);
 
-        addGroupHeader(list, t("APARIENCIA DEL LANZADOR", "LAUNCHER APPEARANCE"), true);
+        tagSubTabFrom(list, filesDataStart, 0);
+        int filesAppStart = list.getChildCount();
 
         wpSub = addActionRow(list,
                 t("Fondo del lanzador", "Launcher Wallpaper"),
@@ -1494,7 +1523,8 @@ public class Launcher extends Activity {
                     public void onClick(View v) { pick(PICK_ICON, "image/*", false); }
                 }, null, null, false);
 
-        addGroupHeader(list, t("DIAGNÓSTICO", "DIAGNOSTICS"), true);
+        tagSubTabFrom(list, filesAppStart, 1);
+        int filesLogsStart = list.getChildCount();
 
         addActionRow(list,
                 t("Registros de depuración", "Debug Logs"),
@@ -1506,11 +1536,13 @@ public class Launcher extends Activity {
                     public void onClick(View v) { exportLogs(); }
                 }, null, null, false);
 
+        tagSubTabFrom(list, filesLogsStart, 2);
         tabLists[TAB_FILES] = list;
         tabScrolls[TAB_FILES] = scroll;
         scroll.addView(list);
         col.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        applySubTabVisibility(TAB_FILES, 0);
         return col;
     }
 
@@ -1627,9 +1659,86 @@ public class Launcher extends Activity {
 
     // ---- Tab switching & Hybrid Pinned Play logic ----
 
+    private void applySubTabVisibility(int tab, int subIdx) {
+        LinearLayout list = (tab >= 0 && tab < TAB_COUNT) ? tabLists[tab] : null;
+        if (list == null) return;
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            Integer s = rowSubTabs.get(child);
+            if (s != null) {
+                child.setVisibility(s == subIdx ? View.VISIBLE : View.GONE);
+            }
+        }
+    }
+
+    private void animateVisibleRows(int tab) {
+        LinearLayout list = (tab >= 0 && tab < TAB_COUNT) ? tabLists[tab] : null;
+        if (list == null) return;
+        int vis = 0;
+        for (int r = 0; r < list.getChildCount(); r++) {
+            View row = list.getChildAt(r);
+            if (row.getVisibility() != View.VISIBLE) continue;
+            row.animate().cancel();
+            Object tag = row.getTag();
+            float targetAlpha = (tag instanceof Float) ? (Float) tag : 1.0f;
+            if (vis < 8) {
+                row.setAlpha(0f);
+                row.setTranslationX(dp(20));
+                row.animate().alpha(targetAlpha).translationX(0f)
+                        .setStartDelay(vis * 22L)
+                        .setDuration(145)
+                        .setInterpolator(new DecelerateInterpolator())
+                        .start();
+            } else {
+                row.setAlpha(targetAlpha);
+                row.setTranslationX(0f);
+            }
+            vis++;
+        }
+    }
+
+    private void selectSubTab(int tab, int subIdx, boolean animate) {
+        if (tab < 0 || tab >= TAB_COUNT || subTabCount[tab] <= 0) return;
+        int clamped = Math.max(0, Math.min(subTabCount[tab] - 1, subIdx));
+        if (animate && clamped == activeSubTab[tab]) return;
+        activeSubTab[tab] = clamped;
+        if (subTabBars[tab] != null) subTabBars[tab].setSelected(clamped);
+        applySubTabVisibility(tab, clamped);
+        if (tabScrolls[tab] != null) tabScrolls[tab].scrollTo(0, 0);
+        if (animate) animateVisibleRows(tab);
+        focusedRowIdx = 0;
+        focusedBtnIdx = 0;
+        if (controllerMode && tab == activeTab) {
+            refreshControllerFocus(false);
+            updateControllerHints();
+        }
+    }
+
     private void selectTab(int idx, boolean animate) {
-        if (animate && idx == activeTab) return;
+        selectTab(idx, 0, animate);
+    }
+
+    private void selectTab(int idx, int subIdx, boolean animate) {
+        if (animate && idx == activeTab && (subTabCount[idx] == 0 || subIdx == activeSubTab[idx])) return;
+        boolean sameTab = (idx == activeTab);
         activeTab = idx;
+        if (subTabCount[idx] > 0) {
+            int clamped = Math.max(0, Math.min(subTabCount[idx] - 1, subIdx));
+            activeSubTab[idx] = clamped;
+            if (subTabBars[idx] != null) subTabBars[idx].setSelected(clamped);
+            applySubTabVisibility(idx, clamped);
+        }
+        if (sameTab && animate) {
+            if (tabScrolls[idx] != null) tabScrolls[idx].scrollTo(0, 0);
+            animateVisibleRows(idx);
+            focusedRowIdx = 0;
+            focusedBtnIdx = 0;
+            if (controllerMode) {
+                refreshControllerFocus(false);
+                updateControllerHints();
+            }
+            return;
+        }
         if (animate) {
             P5Feedback.tab(this);
         }
@@ -1654,27 +1763,8 @@ public class Launcher extends Activity {
                         hdr.animate().alpha(1f).translationX(0f)
                                 .setDuration(140).setInterpolator(new DecelerateInterpolator()).start();
                     }
-                    // Staggered kinetic entrance for first 8 settings rows (preserves disabled alpha)
-                    int count = list.getChildCount();
-                    int limit = Math.min(8, count);
-                    for (int r = 0; r < count; r++) {
-                        View row = list.getChildAt(r);
-                        row.animate().cancel();
-                        Object tag = row.getTag();
-                        float targetAlpha = (tag instanceof Float) ? (Float) tag : 1.0f;
-                        if (r < limit) {
-                            row.setAlpha(0f);
-                            row.setTranslationX(dp(22));
-                            row.animate().alpha(targetAlpha).translationX(0f)
-                                    .setStartDelay(r * 22L)
-                                    .setDuration(155)
-                                    .setInterpolator(new DecelerateInterpolator())
-                                    .start();
-                        } else {
-                            row.setAlpha(targetAlpha);
-                            row.setTranslationX(0f);
-                        }
-                    }
+                    // Staggered kinetic entrance for visible settings rows in active sub-tab
+                    animateVisibleRows(i);
                 } else if (animate) {
                     panel.animate().cancel();
                     panel.setAlpha(0f);
@@ -1723,6 +1813,10 @@ public class Launcher extends Activity {
     private void setControllerMode(boolean active) {
         if (controllerMode == active) return;
         controllerMode = active;
+        P5Views.setControllerModeActive(active);
+        for (int t = 0; t < TAB_COUNT; t++) {
+            if (subTabBars[t] != null) subTabBars[t].setShowTriggers(active);
+        }
         if (controllerHintBar != null) {
             controllerHintBar.setVisibility(active ? View.VISIBLE : View.GONE);
         }
@@ -1839,17 +1933,50 @@ public class Launcher extends Activity {
 
     private void updateControllerHints() {
         if (controllerHintBar == null) return;
-        String okLbl = P5Views.isXboxGamepadLayout() ? "A" : "A";
-        String backLbl = P5Views.isXboxGamepadLayout() ? "B" : "B";
+        String okLbl = "A";
+        String backLbl = "B";
         if (activeTab == TAB_PLAY) {
             controllerHintBar.setHints(
                     new String[] {okLbl + " / START", "LB / RB", "▲▼"},
-                    new String[] {t("JUGAR", "PLAY"), t("PESTAÑAS", "TABS"), t("MENÚ", "TABS")});
-        } else {
+                    new String[] {t("JUGAR", "PLAY"), t("PESTAÑAS", "TABS"), t("MENÚ", "MENU")});
+            return;
+        }
+        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
+        P5Views.AngledRowLayout row = (!rows.isEmpty() && focusedRowIdx >= 0 && focusedRowIdx < rows.size())
+                ? rows.get(focusedRowIdx) : null;
+        boolean hasSeg = row != null && findSegmentedInRow(row) != null;
+        List<P5Views.SlashButton> btns = row != null ? findButtonsInRow(row) : java.util.Collections.<P5Views.SlashButton>emptyList();
+        boolean hasSubTabs = subTabCount[activeTab] > 1;
+
+        if (hasSeg) {
+            if (hasSubTabs) {
+                controllerHintBar.setHints(
+                        new String[] {"◀▶", okLbl, "LT / RT", backLbl, "START"},
+                        new String[] {t("CAMBIAR", "CHANGE"), t("CICLAR", "CYCLE"),
+                                t("SUBPESTAÑA", "SUB-TAB"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+            } else {
+                controllerHintBar.setHints(
+                        new String[] {"◀▶", okLbl, "LB / RB", backLbl, "START"},
+                        new String[] {t("CAMBIAR", "CHANGE"), t("CICLAR", "CYCLE"),
+                                t("PESTAÑAS", "TABS"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+            }
+        } else if (btns.size() > 1) {
             controllerHintBar.setHints(
-                    new String[] {"LB / RB", "▲▼", "◀▶", "LT / RT", okLbl, backLbl, "START"},
-                    new String[] {t("PESTAÑAS", "TABS"), t("MOVER", "SELECT"), t("AJUSTAR", "ADJUST"),
-                            t("SECCIÓN", "GROUP"), t("OK", "ACTIVATE"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+                    new String[] {"◀▶", okLbl, "LT / RT", backLbl, "START"},
+                    new String[] {t("BOTÓN", "SWITCH BTN"), t("ACTIVAR", "ACTIVATE"),
+                            t("SUBPESTAÑA", "SUB-TAB"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+        } else {
+            if (hasSubTabs) {
+                controllerHintBar.setHints(
+                        new String[] {okLbl, "LT / RT", "LB / RB", backLbl, "START"},
+                        new String[] {t("ABRIR", "OPEN"), t("SUBPESTAÑA", "SUB-TAB"),
+                                t("PESTAÑAS", "TABS"), t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+            } else {
+                controllerHintBar.setHints(
+                        new String[] {okLbl, "LB / RB", backLbl, "START"},
+                        new String[] {t("ABRIR", "OPEN"), t("PESTAÑAS", "TABS"),
+                                t("INICIO", "HOME"), t("JUGAR", "PLAY")});
+            }
         }
     }
 
@@ -1866,6 +1993,7 @@ public class Launcher extends Activity {
         focusedBtnIdx = 0;
         P5Feedback.tick(this);
         refreshControllerFocus(true);
+        updateControllerHints();
     }
 
     private void onControllerHorizontal(int dir) {
@@ -1890,60 +2018,21 @@ public class Launcher extends Activity {
         }
     }
 
+    private void fireTriggerOnce(int dir) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastTriggerMs < 180L) return;
+        lastTriggerMs = now;
+        onControllerSectionJump(dir);
+    }
+
     private void onControllerSectionJump(int dir) {
         setControllerMode(true);
-        if (activeTab == TAB_PLAY) {
-            selectTab((activeTab + dir + TAB_COUNT) % TAB_COUNT, true);
-            return;
-        }
-        LinearLayout list = tabLists[activeTab];
-        List<P5Views.AngledRowLayout> rows = getInteractiveRows(activeTab);
-        if (list == null || rows.isEmpty()) return;
-
-        // Collect interactive row indices that start each GroupSubHeaderView section
-        List<Integer> groupStarts = new ArrayList<>();
-        boolean nextStartsGroup = true;
-        int rowOrdinal = 0;
-        for (int i = 0; i < list.getChildCount(); i++) {
-            View child = list.getChildAt(i);
-            if (child instanceof P5Views.GroupSubHeaderView) {
-                nextStartsGroup = true;
-            } else if (child instanceof P5Views.AngledRowLayout && isRowInteractive((P5Views.AngledRowLayout) child)) {
-                if (nextStartsGroup) {
-                    groupStarts.add(rowOrdinal);
-                    nextStartsGroup = false;
-                }
-                rowOrdinal++;
-            }
-        }
-        if (groupStarts.size() <= 1) return;
-
-        int target = groupStarts.get(0);
-        if (dir > 0) {
-            boolean found = false;
-            for (int gs : groupStarts) {
-                if (gs > focusedRowIdx) {
-                    target = gs;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) target = groupStarts.get(0);
-        } else {
-            boolean found = false;
-            for (int i = groupStarts.size() - 1; i >= 0; i--) {
-                if (groupStarts.get(i) < focusedRowIdx) {
-                    target = groupStarts.get(i);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) target = groupStarts.get(groupStarts.size() - 1);
-        }
-        focusedRowIdx = target;
-        focusedBtnIdx = 0;
+        if (activeTab == TAB_PLAY || subTabCount[activeTab] <= 1) return;
+        int cur = activeSubTab[activeTab];
+        int next = Math.max(0, Math.min(subTabCount[activeTab] - 1, cur + dir));
+        if (next == cur) return;
         P5Feedback.tab(this);
-        refreshControllerFocus(true);
+        selectSubTab(activeTab, next, true);
     }
 
     private void onControllerConfirm() {
@@ -1990,8 +2079,17 @@ public class Launcher extends Activity {
                 || keyCode == KeyEvent.KEYCODE_BUTTON_X || keyCode == KeyEvent.KEYCODE_BUTTON_Y;
 
         if (!handledKey) return super.dispatchKeyEvent(event);
-        if (action == KeyEvent.ACTION_UP) return true;
+        if (action == KeyEvent.ACTION_UP) {
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_L2) ltDown = false;
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_R2) rtDown = false;
+            return true;
+        }
         if (action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event);
+
+        // Never repeat bumpers, triggers, Start, Confirm, or Back on hold
+        boolean allowRepeat = (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT);
+        if (!allowRepeat && event.getRepeatCount() > 0) return true;
 
         if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
             setControllerMode(true);
@@ -2004,11 +2102,17 @@ public class Launcher extends Activity {
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_BUTTON_L2) {
-            onControllerSectionJump(-1);
+            if (!ltDown) {
+                ltDown = true;
+                fireTriggerOnce(-1);
+            }
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_BUTTON_R2) {
-            onControllerSectionJump(1);
+            if (!rtDown) {
+                rtDown = true;
+                fireTriggerOnce(1);
+            }
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_BUTTON_START) {
@@ -2080,19 +2184,19 @@ public class Launcher extends Activity {
                 }
             }
 
-            // Analog triggers L2 / R2 for section jumping
+            // Analog triggers L2 / R2 for sub-tab switching (strictly 1 step per pull, shared latch with digital L2/R2)
             float lt = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
             float rt = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
             if (lt > 0.55f && !ltDown) {
                 ltDown = true;
-                onControllerSectionJump(-1);
-            } else if (lt < 0.25f) {
+                fireTriggerOnce(-1);
+            } else if (lt < 0.20f) {
                 ltDown = false;
             }
             if (rt > 0.55f && !rtDown) {
                 rtDown = true;
-                onControllerSectionJump(1);
-            } else if (rt < 0.25f) {
+                fireTriggerOnce(1);
+            } else if (rt < 0.20f) {
                 rtDown = false;
             }
 
