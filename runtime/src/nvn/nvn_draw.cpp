@@ -1228,15 +1228,15 @@ uint32_t compute_dont_care_color_mask(const Targets& tt, const ShaderInfo* vs, c
             sc_x = x, sc_w = w;
         }
         if (g_hud_target) {
-            const int32_t x0 = hud_up(int32_t(sc_x)), y0 = hud_up(int32_t(sc_y));
-            const int64_t x1 = std::min<int64_t>(hud_up_end(int32_t(sc_x + sc_w)), extent.width);
-            const int64_t y1 = std::min<int64_t>(hud_up_end(int32_t(sc_y + sc_h)), extent.height);
+            const int32_t x0 = hud_up(sc_x), y0 = hud_up(sc_y);
+            const int64_t x1 = std::min<int64_t>(hud_up_end(sc_x + sc_w), extent.width);
+            const int64_t y1 = std::min<int64_t>(hud_up_end(sc_y + sc_h), extent.height);
             sc_x = x0, sc_y = y0, sc_w = std::max<int64_t>(0, x1 - x0), sc_h = std::max<int64_t>(0, y1 - y0);
         }
         if (g_low_3d_target) {
-            const int32_t x0 = low_3d_down(int32_t(sc_x)), y0 = low_3d_down(int32_t(sc_y));
-            const int64_t x1 = std::min<int64_t>(low_3d_down_end(int32_t(sc_x + sc_w)), extent.width);
-            const int64_t y1 = std::min<int64_t>(low_3d_down_end(int32_t(sc_y + sc_h)), extent.height);
+            const int32_t x0 = low_3d_down(sc_x), y0 = low_3d_down(sc_y);
+            const int64_t x1 = std::min<int64_t>(low_3d_down_end(sc_x + sc_w), extent.width);
+            const int64_t y1 = std::min<int64_t>(low_3d_down_end(sc_y + sc_h), extent.height);
             sc_x = x0, sc_y = y0, sc_w = std::max<int64_t>(1, x1 - x0), sc_h = std::max<int64_t>(1, y1 - y0);
         }
     }
@@ -2014,8 +2014,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (g_state.has_viewport) vp.x *= k, vp.y *= k, vp.width *= k, vp.height *= k;
         if (g_state.has_scissor) {
             const int32_t x0 = hud_up(sc.offset.x), y0 = hud_up(sc.offset.y);
-            const int64_t x1 = std::min<int64_t>(hud_up_end(int32_t(sc.offset.x + int64_t(sc.extent.width))), g_pass_extent.width);
-            const int64_t y1 = std::min<int64_t>(hud_up_end(int32_t(sc.offset.y + int64_t(sc.extent.height))), g_pass_extent.height);
+            const int64_t x1 = std::min<int64_t>(hud_up_end(int64_t(sc.offset.x) + int64_t(sc.extent.width)), g_pass_extent.width);
+            const int64_t y1 = std::min<int64_t>(hud_up_end(int64_t(sc.offset.y) + int64_t(sc.extent.height)), g_pass_extent.height);
             sc = {{x0, y0}, {uint32_t(std::max<int64_t>(0, x1 - x0)), uint32_t(std::max<int64_t>(0, y1 - y0))}};
         }
     }
@@ -2032,8 +2032,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (g_state.has_viewport) vp.x *= k, vp.y *= k, vp.width *= k, vp.height *= k;
         if (g_state.has_scissor) {
             const int32_t x0 = low_3d_down(sc.offset.x), y0 = low_3d_down(sc.offset.y);
-            const int64_t x1 = std::min<int64_t>(low_3d_down_end(int32_t(sc.offset.x + int64_t(sc.extent.width))), g_pass_extent.width);
-            const int64_t y1 = std::min<int64_t>(low_3d_down_end(int32_t(sc.offset.y + int64_t(sc.extent.height))), g_pass_extent.height);
+            const int64_t x1 = std::min<int64_t>(low_3d_down_end(int64_t(sc.offset.x) + int64_t(sc.extent.width)), g_pass_extent.width);
+            const int64_t y1 = std::min<int64_t>(low_3d_down_end(int64_t(sc.offset.y) + int64_t(sc.extent.height)), g_pass_extent.height);
             sc = {{x0, y0}, {uint32_t(std::max<int64_t>(1, x1 - x0)), uint32_t(std::max<int64_t>(1, y1 - y0))}};
         }
     }
