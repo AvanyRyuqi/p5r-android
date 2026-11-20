@@ -809,10 +809,10 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
-        options.add(new Option(TAB_PERFORMANCE, "NX_ENABLE_LOG",
+        options.add(new Option(TAB_FILES, "NX_ENABLE_LOG",
                 "Registro de depuración (nx.log)", "Debug Logging (nx.log)",
-                "Actívalo solo para capturar errores (toque con 3 dedos)",
-                "Enable only when debugging or using the 3-finger capture tap",
+                "Graba detalles del motor y GPU en nx.log (los cierres se guardan siempre)",
+                "Records engine & GPU details to nx.log (crashes are always logged automatically)",
                 new String[] {"0", "1"},
                 new String[] {"NO", "SÍ"},
                 new String[] {"OFF", "ON"}, 0, false));
@@ -1048,6 +1048,7 @@ public class Launcher extends Activity {
         specFps = addSpecBadge(specBar, "FPS", "30", false, TAB_PERFORMANCE, 0);
         specGfx = addSpecBadge(specBar, "GFX", "LOW", false, TAB_PERFORMANCE, 1);
         specExtra = addSpecBadge(specBar, "ENH", "OFF", false, TAB_DISPLAY, 1);
+        addSpecBadge(specBar, "LOGS", "EXPORT", false, TAB_FILES, 2);
         panel.addView(specBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -1526,15 +1527,18 @@ public class Launcher extends Activity {
         tagSubTabFrom(list, filesAppStart, 1);
         int filesLogsStart = list.getChildCount();
 
+        Option dbgLogOpt = findOption("NX_ENABLE_LOG");
+        if (dbgLogOpt != null) addOptionRow(list, dbgLogOpt);
+
         addActionRow(list,
                 t("Registros de depuración", "Debug Logs"),
-                t("Exporta logcat + nx.log a Download/p5r-log.txt",
-                        "Exports logcat + nx.log to Download/p5r-log.txt"),
+                t("Exporta equipo, ajustes, cierres, nx.log y logcat a Download/p5r-log.txt",
+                        "Exports device info, settings, crash log, nx.log & logcat to Download/p5r-log.txt"),
                 t("EXPORTAR", "EXPORT LOGS"),
                 new View.OnClickListener() {
                     @Override
                     public void onClick(View v) { exportLogs(); }
-                }, null, null, false);
+                }, null, null, true);
 
         tagSubTabFrom(list, filesLogsStart, 2);
         tabLists[TAB_FILES] = list;
@@ -2772,6 +2776,36 @@ public class Launcher extends Activity {
         }
     }
 
+    private void appendCappedFile(StringBuilder sb, String title, File f, int maxHeadLines, int maxTailLines) {
+        if (!f.exists() || !f.isFile()) return;
+        sb.append("\n=== ").append(title)
+                .append(" (").append(f.length()).append(" bytes, modified ")
+                .append(new java.util.Date(f.lastModified())).append(") ===\n");
+        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+            java.util.ArrayList<String> head = new java.util.ArrayList<>(Math.min(maxHeadLines, 512));
+            java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>(Math.min(maxTailLines, 2048));
+            int total = 0;
+            String line;
+            while ((line = br.readLine()) != null) {
+                total++;
+                if (head.size() < maxHeadLines) {
+                    head.add(line);
+                } else {
+                    if (tail.size() == maxTailLines) tail.removeFirst();
+                    tail.addLast(line);
+                }
+            }
+            for (String s : head) sb.append(s).append("\n");
+            int skipped = total - head.size() - tail.size();
+            if (skipped > 0) {
+                sb.append("... [omitted ").append(skipped).append(" middle lines] ...\n");
+            }
+            for (String s : tail) sb.append(s).append("\n");
+        } catch (Exception e) {
+            sb.append("read error: ").append(e.getMessage()).append("\n");
+        }
+    }
+
     void exportLogs() {
         try {
             File dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
@@ -2779,36 +2813,63 @@ public class Launcher extends Activity {
             File out = new File(dl, "p5r-log.txt");
             StringBuilder sb = new StringBuilder();
             sb.append("=== Persona 5 Royal Recomp Log Export ===\n");
-            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
-            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
-            sb.append("Date: ").append(new java.util.Date().toString()).append("\n\n");
-
             try {
-                Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-t", "500"});
+                android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+                long vc = Build.VERSION.SDK_INT >= 28 ? pi.getLongVersionCode() : pi.versionCode;
+                sb.append("App: ").append(pi.versionName).append(" (versionCode ").append(vc).append(")\n");
+            } catch (Exception ignored) {}
+            String soc = Build.HARDWARE + " / " + Build.BOARD;
+            if (Build.VERSION.SDK_INT >= 31 && Build.SOC_MODEL != null && !Build.SOC_MODEL.isEmpty()) {
+                soc = Build.SOC_MODEL + " (" + soc + ")";
+            }
+            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+            sb.append("SoC / Board: ").append(soc).append("\n");
+            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+            try {
+                android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                if (am != null) {
+                    android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                    am.getMemoryInfo(mi);
+                    sb.append("Memory: ").append(mi.availMem / (1024L * 1024L)).append(" MB free / ")
+                            .append(mi.totalMem / (1024L * 1024L)).append(" MB total\n");
+                }
+            } catch (Exception ignored) {}
+            String drv = activeDriver();
+            sb.append("GPU Driver: ").append(drv.isEmpty() ? "System driver" : drv).append("\n");
+            sb.append("Date: ").append(new java.util.Date().toString()).append("\n");
+
+            sb.append("\n=== Active Settings ===\n");
+            for (Option o : options) {
+                String val = (o.pick >= 0 && o.pick < o.values.length) ? o.values[o.pick] : "?";
+                String lbl = (o.pick >= 0 && o.pick < o.labelsEn.length) ? o.labelsEn[o.pick] : "?";
+                sb.append(o.key).append("=").append(val).append(" (").append(lbl).append(")\n");
+            }
+
+            sb.append("\n=== Mods ===\n");
+            File modsDir = new File(dataDir(), "mods");
+            File[] modEntries = modsDir.isDirectory() ? modsDir.listFiles() : null;
+            if (modEntries != null && modEntries.length > 0) {
+                java.util.Arrays.sort(modEntries);
+                for (File m : modEntries) {
+                    sb.append("- ").append(m.getName()).append(m.isDirectory() ? "/" : "").append("\n");
+                }
+            } else {
+                sb.append("(none)\n");
+            }
+
+            appendCappedFile(sb, "nx_crash.log", new File(dataDir(), "nx_crash.log"), 500, 1000);
+            appendCappedFile(sb, "nx.log", new File(dataDir(), "nx.log"), 250, 2500);
+            appendCappedFile(sb, "nx.log.prev", new File(dataDir(), "nx.log.prev"), 250, 2500);
+
+            sb.append("\n=== logcat (last 1500 lines) ===\n");
+            try {
+                Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-t", "1500"});
                 try (BufferedReader br = new BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
                     String line;
                     while ((line = br.readLine()) != null) sb.append(line).append("\n");
                 }
             } catch (Exception e) {
                 sb.append("logcat capture error: ").append(e.getMessage()).append("\n");
-            }
-
-            File nxLog = new File(dataDir(), "nx.log");
-            if (nxLog.exists()) {
-                sb.append("\n=== nx.log ===\n");
-                try (BufferedReader br = new BufferedReader(new FileReader(nxLog))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line).append("\n");
-                }
-            }
-
-            File nxLogPrev = new File(dataDir(), "nx.log.prev");
-            if (nxLogPrev.exists()) {
-                sb.append("\n=== nx.log.prev ===\n");
-                try (BufferedReader br = new BufferedReader(new FileReader(nxLogPrev))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line).append("\n");
-                }
             }
 
             try (FileWriter fw = new FileWriter(out)) {

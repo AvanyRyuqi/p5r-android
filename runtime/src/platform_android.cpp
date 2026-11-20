@@ -783,6 +783,7 @@ struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
 
 void crash(int sig, siginfo_t* info, void* uc) {
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
+    nx::begin_crash_log();
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
 #if NX_NCE
     // In the game's own code: its registers are in the signal's context, not in the thread's CPU.
