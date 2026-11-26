@@ -124,6 +124,8 @@ bool auto_fps() {
 }
 
 bool g_scene = false;  // scan_tasks: the title or a cutscene is running, and no battle
+bool g_battle = false;  // scan_tasks: a battle task is running
+bool g_slow_device = false;  // game_clock: the device has been under ~20 fps for a while (latched, with hysteresis)
 bool g_field_scene = false;  // scan_tasks: a scripted field scene (EventSkip, no event_proc, no battle): steps only
 
 // The lowest target: in scenes NX_P5R_SCENE_FPS (10), in field scenes a third of the cap, elsewhere NX_P5R_MIN_FPS
@@ -191,7 +193,13 @@ uint64_t last_start = 0, prev_start = 0;  // the engine's last two frame starts 
 float max_frame_s() {
     static const int ms = env_int("NX_P5R_MAX_FRAME_MS", 0);
     if (ms > 0) return float(std::clamp(ms, 50, 500)) / 1000.0f;
-    return std::max(0.05f, 1.5f / float(min_fps()));
+    const float base = std::max(0.05f, 1.5f / float(min_fps()));
+    // Outside the scenes the target stays at 30 and the clamp at 50 ms, so on a phone doing 8-15 fps every frame is
+    // cut to 50 ms and dialogue, text and timed waits (cutscenes whose tasks are not recognised as scenes) run at
+    // 30-45 % of real time (the log: 'N of N frames cut', steps 1.4 s in 3.0 s). While the device stays slow the game
+    // clock follows the real frame up to 150 ms, as it already does in scenes. Not in battles (their logic is touchy).
+    if (g_slow_device && !g_battle) return std::max(base, 0.15f);
+    return base;
 }
 
 uint64_t game_clock() {
@@ -229,6 +237,10 @@ uint64_t game_clock() {
         }
         if (d + 19200 < r) cut++;
         longest = std::max(longest, r);
+        static double ema = 0;
+        ema = ema > 0 ? ema + (double(r) / kTicks - ema) * 0.1 : double(r) / kTicks;
+        if (!g_slow_device && ema > 0.050) g_slow_device = true;       // under 20 fps
+        else if (g_slow_device && ema < 0.040) g_slow_device = false;  // back over 25 fps
     }
     last_start = start;
     if (real < 3 * uint64_t(kTicks)) return r;
@@ -324,6 +336,7 @@ void scan_tasks() {
         for (char& ch : str) if (ch == ' ') ch = '_';
         cur.push_back(str.empty() ? "?" : str);
     }
+    g_battle = battle;
     const bool scene = (title || event) && !battle;
     static const bool field_on = env_int("NX_P5R_FIELD_SCENES", 1) != 0;
     // Restrict discrete step pacing (cap, cap/2, cap/3 = 30, 15, 10) strictly to scripted field scenes (with EventSkip/General_*)
